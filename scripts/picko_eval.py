@@ -195,6 +195,30 @@ def confusion(examples, pred_texts):
     return mat
 
 
+def tools_token_len(tools, tokenizer):
+    """Token length of a `tools` field (JSON string or list of tool dicts)."""
+    if not isinstance(tools, str):
+        tools = json.dumps(tools, separators=(",", ":"), ensure_ascii=False)
+    return len(tokenizer.encode(tools))
+
+
+def n_visible(query, tools, tokenizer, max_enc_len=1024):
+    """How many of the offered tools survive the encoder's truncation, i.e. how
+    many appear before `[query, <tools>, schemas...]` is cut to `max_enc_len`.
+    Mirrors `needle.model.run._build_encoder_input`. `tools` is a list of dicts."""
+    q_toks = tokenizer.encode(query)
+    max_query = max_enc_len - 2
+    q_toks = q_toks[:max_query]
+    budget = max_enc_len - len(q_toks) - 1          # tokens left for tool schemas
+    visible = 0
+    for i in range(len(tools)):
+        s = json.dumps(tools[:i + 1], separators=(",", ":"), ensure_ascii=False)
+        if len(tokenizer.encode(s)) > budget:
+            break
+        visible = i + 1
+    return visible
+
+
 def build_tools_override(examples, k, catalog, seed=0):
     """For D1: rebuild each example's offered tools as {gold + (k-1) distractors}
     drawn from the full catalog. `catalog` is a list of tool dicts."""
