@@ -91,3 +91,5 @@ wandb/
 tokenizer/
 voice_samples/
 needle-ui.*
+.jax_cache/
+.DS_Store

@@ -18,6 +18,8 @@ import random
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
 
 # ---- locate repo ROOT robustly (works from notebooks/research/, Colab, etc.) ----
 _MARKER = "full_tools_53tools_11products.json"
@@ -64,6 +66,40 @@ from scripts.picko_eval import (load_model, predict, evaluate, confusion,   # no
                                 base_checkpoint, tools_token_len, n_visible)
 from needle.training.finetune import _per_tool_split                     # noqa: E402
 from needle.dataset.dataset import get_tokenizer                         # noqa: E402
+
+
+# ---- observability (works the same locally and on Colab) ----
+def log(msg):
+    """Timestamped, flushed print. Also appends to PICKO_LOG (point it at Drive on
+    Colab) so a walk-away run leaves a durable trail that survives a runtime restart."""
+    line = f"[{datetime.now():%H:%M:%S}] {msg}"
+    print(line, flush=True)
+    path = os.environ.get("PICKO_LOG")
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+
+def env_report(out_dir=None):
+    """Print jax devices, the accelerator, and whether OUT_DIR is durable (Drive) or
+    ephemeral — a one-glance header for a run-and-forget session."""
+    import jax
+    out_dir = out_dir or os.environ.get("PICKO_OUT_DIR") or os.path.join(ROOT, "checkpoints")
+    durable = out_dir.startswith("/content/drive")
+    devs = jax.devices()
+    plat = devs[0].platform if devs else "?"
+    log(f"jax {jax.__version__} · devices={devs} · platform={plat}")
+    log(f"OUT_DIR={out_dir} ({'DURABLE — Google Drive' if durable else 'ephemeral — NOT Drive'})")
+    log(f"compile-cache={os.environ.get('JAX_COMPILATION_CACHE_DIR', '(off)')}")
+    if not durable and _ON_COLAB:
+        log("WARNING: OUT_DIR is not on Drive — checkpoints/results will be LOST on a runtime restart.")
+    return {"devices": [str(d) for d in devs], "platform": plat,
+            "out_dir": out_dir, "durable": durable}
+
 
 def _run_finetune(jsonl_path, epochs, batch_size=16):
     """Run `needle finetune` robustly. Prefer the console script if present, else
@@ -198,23 +234,30 @@ def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
 
     ckpt = os.path.join(out_dir, f"picko_{tag}_best.pkl")
     if run_train and (force_retrain or not os.path.exists(ckpt)):
-        print(f"[{tag}] finetuning on {len(data)} examples ({len(names)} tools)…", flush=True)
+        log(f"[{tag}] finetuning on {len(data)} examples ({len(names)} tools), "
+            f"epochs={epochs} batch={batch_size}…")
+        t0 = time.time()
         _run_finetune(path, epochs, batch_size=batch_size)
         newest = max(glob.glob(os.path.join(ROOT, "checkpoints", "needle_finetuned_*_best.pkl")),
                      key=os.path.getmtime)
         shutil.copy(newest, ckpt)
+        mb = os.path.getsize(ckpt) / 1e6
+        log(f"[{tag}] trained in {time.time()-t0:.0f}s · checkpoint saved → {ckpt} ({mb:.1f} MB)")
     else:
-        print(f"[{tag}] using existing checkpoint {os.path.basename(ckpt)}", flush=True)
+        log(f"[{tag}] resumed (skipped training) — using existing checkpoint {os.path.basename(ckpt)}")
     assert os.path.exists(ckpt), f"missing {ckpt} — run with run_train=True first"
 
     _, _, test = _per_tool_split(data)
     if eval_subsample:
         test = test[:eval_subsample]
+    t1 = time.time()
     m, p, tk = load_model(ckpt)
     _ctx = contextlib.redirect_stdout(io.StringIO()) if quiet_decode else contextlib.nullcontext()
     with _ctx:
         preds = predict(m, p, tk, test, max_gen_len=max_gen_len)
     metrics = evaluate(test, preds, family_of=family_of)
+    log(f"[{tag}] evaluated {len(test)} examples in {time.time()-t1:.0f}s · "
+        f"selection={metrics['selection_acc']:.3f} name_f1={metrics['name_f1']:.3f}")
     return {"names": names, "ckpt": ckpt, "bundle": (m, p, tk),
             "test": test, "preds": preds, "metrics": metrics, "data": data}
 
