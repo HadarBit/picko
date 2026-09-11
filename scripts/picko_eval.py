@@ -24,6 +24,7 @@ Use:
 """
 import json
 import os
+import re
 
 from needle.model.run import load_checkpoint, generate_batch
 from needle.model.architecture import SimpleAttentionNetwork
@@ -49,6 +50,23 @@ def _parse(text):
     if isinstance(v, dict):
         v = [v]
     return v if isinstance(v, list) else []
+
+
+_NAME_RE = re.compile(r'"name"\s*:\s*"([^"]+)"')
+
+
+def _salvage(text):
+    """Recover tool-call names from truncated/invalid JSON (regex on `"name":"X"`).
+    Lets us cap decode length short — the name appears at the very start of the
+    output — and still score tool SELECTION correctly. Arguments are left empty
+    (a truncated call has no reliable args), so parameter metrics are unaffected."""
+    return [{"name": n, "arguments": {}} for n in _NAME_RE.findall(text or "")]
+
+
+def _calls(text):
+    """Strict JSON parse, falling back to name salvage when it's unparseable."""
+    v = _parse(text)
+    return v if v is not None else _salvage(text)
 
 
 def predict(model, params, tok, examples, batch=32, max_gen_len=512, max_enc_len=1024,
@@ -100,10 +118,12 @@ def evaluate(examples, pred_texts, family_of=None):
 
     for ex, ptext in zip(examples, pred_texts):
         ref = _parse(ex.get("answers", "[]")) or []
-        pred = _parse(ptext)
-        if pred is not None:
+        pred_strict = _parse(ptext)
+        if pred_strict is not None:
             parse_ok += 1
-        pred = pred or []
+            pred = pred_strict
+        else:
+            pred = _salvage(ptext)   # recover the name from truncated JSON
 
         # abstention examples (empty reference)
         if not _primary(ref):
@@ -187,9 +207,10 @@ def confusion(examples, pred_texts):
         rp = _primary(ref)
         if not rp:
             continue
-        pred = _parse(ptext)
-        pp = _primary(pred) if pred is not None else None
-        pname = pp["name"] if pp else ("?" if pred is None else "∅")
+        strict = _parse(ptext)
+        pred = strict if strict is not None else _salvage(ptext)
+        pp = _primary(pred)
+        pname = pp["name"] if pp else ("∅" if strict is not None else "?")
         mat.setdefault(rp["name"], {}).setdefault(pname, 0)
         mat[rp["name"]][pname] += 1
     return mat

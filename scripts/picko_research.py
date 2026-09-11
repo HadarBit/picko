@@ -149,11 +149,18 @@ def sample_stratified(cat, names, tools_per_bucket, seed=0):
 # ---- finetune + eval (shared by NB1/NB2/NB3 and run_research.py) ----
 def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
                       compact=False, offer_all=None, token_aware=False,
-                      eval_subsample=None, run_train=True, force_retrain=False):
+                      eval_subsample=None, run_train=True, force_retrain=False,
+                      max_gen_len=256, quiet_decode=True):
     """Re-scope -> finetune (gated/resumable) -> copy stable checkpoint -> eval.
 
-    Returns {names, ckpt, bundle, test, preds, metrics, data}.
+    `max_gen_len` caps decode length — short is much faster because weak models
+    otherwise generate to the cap. Selection is recovered by regex even if a short
+    cap truncates the JSON (see picko_eval._salvage), so Breadth can use ~64.
+    `quiet_decode` silences needle's constrained-decoder prints (thousands of lines
+    that slow Colab). Returns {names, ckpt, bundle, test, preds, metrics, data}.
     """
+    import contextlib
+    import io
     kw = dict(cap_per_tool=cap, compact=compact, seed=0)
     if offer_all is not None:
         kw["offer_all_max"] = offer_all
@@ -180,7 +187,9 @@ def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
     if eval_subsample:
         test = test[:eval_subsample]
     m, p, tk = load_model(ckpt)
-    preds = predict(m, p, tk, test)
+    _ctx = contextlib.redirect_stdout(io.StringIO()) if quiet_decode else contextlib.nullcontext()
+    with _ctx:
+        preds = predict(m, p, tk, test, max_gen_len=max_gen_len)
     metrics = evaluate(test, preds, family_of=family_of)
     return {"names": names, "ckpt": ckpt, "bundle": (m, p, tk),
             "test": test, "preds": preds, "metrics": metrics, "data": data}
