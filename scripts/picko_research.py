@@ -54,7 +54,19 @@ from scripts.picko_eval import (load_model, predict, evaluate, confusion,   # no
 from needle.training.finetune import _per_tool_split                     # noqa: E402
 from needle.dataset.dataset import get_tokenizer                         # noqa: E402
 
-NEEDLE = shutil.which("needle") or os.path.join(os.path.dirname(sys.executable), "needle")
+def _run_finetune(jsonl_path, epochs):
+    """Run `needle finetune` robustly. Prefer the console script if present, else
+    invoke needle.cli.main in a subprocess with the SAME Python (works on Colab
+    without `pip install -e .`, and inherits the GPU env)."""
+    exe = shutil.which("needle")
+    if exe:
+        subprocess.run([exe, "finetune", jsonl_path, "--epochs", str(epochs),
+                        "--batch-size", "32"], cwd=ROOT, check=True)
+        return
+    argv = ["finetune", jsonl_path, "--epochs", str(epochs), "--batch-size", "32"]
+    code = (f"import sys; sys.argv=['needle']+{argv!r}; "
+            "from needle.cli import main; main()")
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
 
 # ---- context ----
@@ -156,8 +168,7 @@ def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
     ckpt = os.path.join(out_dir, f"picko_{tag}_best.pkl")
     if run_train and (force_retrain or not os.path.exists(ckpt)):
         print(f"[{tag}] finetuning on {len(data)} examples ({len(names)} tools)…", flush=True)
-        subprocess.run([NEEDLE, "finetune", path, "--epochs", str(epochs),
-                        "--batch-size", "32"], cwd=ROOT, check=True)
+        _run_finetune(path, epochs)
         newest = max(glob.glob(os.path.join(ROOT, "checkpoints", "needle_finetuned_*_best.pkl")),
                      key=os.path.getmtime)
         shutil.copy(newest, ckpt)
