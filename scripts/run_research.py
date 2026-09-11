@@ -26,7 +26,8 @@ import shutil
 import subprocess
 import sys
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# NB: do not force JAX_PLATFORMS — let JAX auto-detect (GPU on Colab, CPU locally).
+# To force CPU locally, export JAX_PLATFORMS=cpu before running.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -41,41 +42,24 @@ from needle.dataset.dataset import get_tokenizer
 
 NEEDLE = shutil.which("needle") or os.path.join(os.path.dirname(sys.executable), "needle")
 
+# Persistent output dir (checkpoints + results). Set PICKO_OUT_DIR to a Google
+# Drive path on Colab so a runtime restart doesn't lose progress; the runner then
+# skips any tag whose checkpoint already exists there (resumable).
+OUT_DIR = os.environ.get("PICKO_OUT_DIR") or os.path.join(ROOT, "checkpoints")
+os.makedirs(OUT_DIR, exist_ok=True)
+RESULTS_JSON = os.path.join(OUT_DIR, "research_results.json")
+
+
+from scripts.picko_research import finetune_and_eval as _fe   # shared logic (no drift)
+
 
 def finetune_and_eval(cat, raw, tok, names, tag, *, cap, epochs, retrain,
                       compact=False, offer_all=None, token_aware=False,
                       eval_subsample=None):
-    kw = dict(cap_per_tool=cap, compact=compact, seed=0)
-    if offer_all is not None:
-        kw["offer_all_max"] = offer_all
-    if token_aware:
-        kw["tokenizer"] = tok
-    data = cat.restrict_dataset(raw, names, **kw)
-    path = os.path.join(ROOT, "data", f"picko_{tag}.jsonl")
-    with open(path, "w") as f:
-        for e in data:
-            f.write(json.dumps(e, ensure_ascii=False) + "\n")
-
-    ckpt = os.path.join(ROOT, "checkpoints", f"picko_{tag}_best.pkl")
-    if retrain or not os.path.exists(ckpt):
-        print(f"[{tag}] finetuning on {len(data)} examples ({len(names)} tools)…", flush=True)
-        subprocess.run([NEEDLE, "finetune", path, "--epochs", str(epochs),
-                        "--batch-size", "32"], cwd=ROOT, check=True)
-        newest = max(glob.glob(os.path.join(ROOT, "checkpoints", "needle_finetuned_*_best.pkl")),
-                     key=os.path.getmtime)
-        shutil.copy(newest, ckpt)
-    else:
-        print(f"[{tag}] reusing existing checkpoint (use --retrain to redo)", flush=True)
-
-    _, _, test = _per_tool_split(data)
-    if eval_subsample:
-        test = test[:eval_subsample]
-    m, p, tk = load_model(ckpt)
-    print(f"[{tag}] evaluating on {len(test)} test examples…", flush=True)
-    preds = predict(m, p, tk, test)
-    metrics = evaluate(test, preds, family_of=family_of)
-    return {"names": names, "ckpt": ckpt, "bundle": (m, p, tk),
-            "test": test, "preds": preds, "metrics": metrics, "data": data}
+    """Thin wrapper over scripts.picko_research.finetune_and_eval, writing to OUT_DIR."""
+    return _fe(cat, raw, tok, names, tag, OUT_DIR, cap=cap, epochs=epochs,
+               compact=compact, offer_all=offer_all, token_aware=token_aware,
+               eval_subsample=eval_subsample, run_train=True, force_retrain=retrain)
 
 
 def main():
@@ -96,6 +80,10 @@ def main():
     results = {"config": {"cap_per_tool": args.cap_per_tool, "epochs": args.epochs,
                           "focus": FOCUS}}
 
+    def _save():
+        with open(RESULTS_JSON, "w") as f:
+            json.dump(results, f, indent=2)
+
     # 1) Baseline — 3 diverse tools (one per family where possible)
     print("\n=== Baseline (3 tools) ===", flush=True)
     baseline_tools = ["arxiv_search_papers", "pubmed_search_articles", "wikipedia_search_wikipedia"]
@@ -106,6 +94,7 @@ def main():
     results["baseline"] = {"tools": baseline_tools,
                            "base": evaluate(R["test"], base_preds, family_of=family_of),
                            "finetuned": R["metrics"]}
+    _save()
 
     # 2) Breadth — nested sizes, compact, selection only
     print("\n=== Breadth (tool-set size) ===", flush=True)
@@ -120,6 +109,7 @@ def main():
                         "name_f1": Rk["metrics"]["name_f1"], "n_visible": vis})
         print(f"  k={k}: selection={Rk['metrics']['selection_acc']:.3f} visible={vis}/{k}", flush=True)
     results["breadth"] = breadth
+    _save()
 
     # 3) Depth — all 40, full schemas, per parameter-count bucket
     print("\n=== Depth (parameter complexity) ===", flush=True)
@@ -135,6 +125,7 @@ def main():
     results["depth"] = {"per_tool": depth_tools, "overall": {
         k: DEPTH["metrics"][k] for k in ["selection_acc", "name_f1", "args_exact_acc",
                                          "param_f1", "call_exact"]}}
+    _save()
 
     # 4) Separation — curated look-alike groups on the 40-tool model
     print("\n=== Separation (disambiguation) ===", flush=True)
@@ -153,11 +144,11 @@ def main():
                            "confusion": confusion(gtest, gpreds)})
         print(f"  {gname}: selection={gm['selection_acc']:.3f}", flush=True)
     results["separation"] = separation
+    _save()
 
-    out = os.path.join(ROOT, "data", "research_results.json")
-    with open(out, "w") as f:
+    with open(RESULTS_JSON, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\nDONE — wrote {out}", flush=True)
+    print(f"\nDONE — wrote {RESULTS_JSON}", flush=True)
 
 
 if __name__ == "__main__":

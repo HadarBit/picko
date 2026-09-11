@@ -36,6 +36,23 @@ def nested_sets(names, sizes=BREADTH_SIZES, seed=0):
     return out
 
 
+def breadth_pool(cat, focus, seed=0):
+    """Ordered tool pool for the Breadth sweep: the `focus` tools (shuffled) first,
+    then every other catalog tool (shuffled). Taking prefixes keeps small sizes
+    inside the focus while sizes > len(focus) extend to the full 75-tool catalog."""
+    rng = random.Random(seed)
+    focus = list(focus)
+    rng.shuffle(focus)
+    others = [t["name"] for t in cat.tools if t["name"] not in set(focus)]
+    rng.shuffle(others)
+    return focus + others
+
+
+def size_sets(pool, sizes=BREADTH_SIZES):
+    """Nested prefixes of an already-ordered pool: {k: pool[:k]} (no reshuffle)."""
+    return {k: pool[:min(k, len(pool))] for k in sizes}
+
+
 # ---- Separation (Disambiguation) — curated look-alike groups ----
 # Each group is a set of tools that do a very similar thing (same action across
 # sources, or same source with subtly different actions) and are therefore the
