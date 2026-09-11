@@ -84,6 +84,18 @@ def log(msg):
             pass
 
 
+def save_fig(name, out_dir=None, dpi=150):
+    """Save the current matplotlib figure to OUT_DIR (Drive on Colab) and log where.
+    `name` may omit the extension. Call it right before `plt.show()`."""
+    import matplotlib.pyplot as plt
+    out_dir = out_dir or os.environ.get("PICKO_OUT_DIR") or os.path.join(ROOT, "checkpoints")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, name if name.endswith(".png") else name + ".png")
+    plt.savefig(path, dpi=dpi, bbox_inches="tight")
+    log(f"saved plot → {path}")
+    return path
+
+
 def env_report(out_dir=None):
     """Print jax devices, the accelerator, and whether OUT_DIR is durable (Drive) or
     ephemeral — a one-glance header for a run-and-forget session."""

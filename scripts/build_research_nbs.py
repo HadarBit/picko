@@ -172,7 +172,7 @@ if len(wall):
     ax.text(kw, 0.06, f" truncation wall\\n (~{vw} of {kw} tools visible)", color="#C44E52", fontsize=9, va="bottom")
 ax.set_xlabel("# tools trained / offered (k)"); ax.set_ylabel("tool-selection accuracy")
 ax.set_ylim(0,1.02); ax.set_title("Breadth: selection accuracy vs tool-set size"); ax.legend()
-plt.tight_layout(); plt.show()'''),
+plt.tight_layout(); save_fig("breadth_curve"); plt.show()'''),
  md("""## 5 · Read-out
 
 - Selection holds up to ~`k` tools then drops; the red line marks where the **compact** offered list stops
@@ -262,7 +262,7 @@ for _, r in per_iter.iterrows():
 ax.set_xticks(x); ax.set_xticklabels(agg.index); ax.set_ylim(0,1)
 ax.set_xlabel("# parameters (bucket)"); ax.set_ylabel("accuracy")
 ax.set_title(f"Depth: parameter extraction vs #params ({int(agg['n_iter'].max())} iterations)"); ax.legend()
-plt.tight_layout(); plt.show()'''),
+plt.tight_layout(); save_fig("depth_buckets"); plt.show()'''),
  md("## 5 · Per-tool scatter (all iterations)"),
  co('''tool_mean = depth.groupby(["tool","total_params"])["args_exact_acc"].mean().reset_index()
 plt.figure(figsize=(7.5,4.5))
@@ -270,7 +270,8 @@ plt.scatter(tool_mean["total_params"], tool_mean["args_exact_acc"], s=55, color=
 for _, r in tool_mean.iterrows():
     plt.annotate(r["tool"].split("_")[0], (r["total_params"], r["args_exact_acc"]), fontsize=7)
 plt.xlabel("# parameters in tool"); plt.ylabel("mean args_exact_acc")
-plt.title("Depth: per-tool extraction vs parameter count"); plt.tight_layout(); plt.show()'''),
+plt.title("Depth: per-tool extraction vs parameter count")
+plt.tight_layout(); save_fig("depth_scatter"); plt.show()'''),
  md("""## 6 · Read-out
 
 Argument extraction is near-solved for **0–1 parameter** tools and **degrades for multi-parameter (4+)**
@@ -340,7 +341,7 @@ display(separation)
 
 plt.figure(figsize=(8,4)); plt.barh(separation["group"], separation["selection_acc"], color="#4C72B0")
 plt.xlim(0,1); plt.xlabel("tool-selection accuracy"); plt.title("Separation: hardest look-alike groups (lower = more confused)")
-plt.tight_layout(); plt.show()'''),
+plt.tight_layout(); save_fig("separation_groups"); plt.show()'''),
  md("## 5 · Confusion heatmaps (who gets mistaken for whom)"),
  co('''for gname, conf in group_conf.items():
     labels = sorted(set(conf) | {p for row in conf.values() for p in row})
@@ -352,7 +353,7 @@ plt.tight_layout(); plt.show()'''),
     else:
         plt.imshow(M.values, cmap="Blues"); plt.xticks(range(len(labels)), labels, rotation=90); plt.yticks(range(len(M)), M.index)
     plt.title(f"Separation · {gname}"); plt.xlabel("predicted"); plt.ylabel("reference")
-    plt.tight_layout(); plt.show()'''),
+    plt.tight_layout(); save_fig(f"separation_confusion_{gname}"); plt.show()'''),
  md("""## 6 · Read-out
 
 Residual selection errors concentrate inside these look-alike groups. The lowest-accuracy group is the
