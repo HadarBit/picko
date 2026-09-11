@@ -42,8 +42,19 @@ def _find_root():
 ROOT = _find_root()
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-if "google.colab" not in sys.modules:
+
+# ---- JAX / GPU env (must be set BEFORE jax initializes, i.e. before the imports
+# below and inherited by the finetune subprocess) ----
+_ON_COLAB = "google.colab" in sys.modules
+if not _ON_COLAB:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")   # local = CPU; Colab auto-detects GPU
+# reuse compiled XLA kernels across the many finetune subprocesses (huge speedup —
+# the train step has fixed shapes, so it compiles once and is reused for every size)
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR",
+                      "/content/jax_cache" if _ON_COLAB else os.path.join(ROOT, ".jax_cache"))
+if _ON_COLAB:
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")   # don't grab 75% of VRAM up front
+    os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")    # fewer fragmentation OOMs
 
 from scripts.tool_catalog import Catalog, family_of                      # noqa: E402
 from scripts.research_sets import (FOCUS_FAMILIES, focus_names, BREADTH_SIZES,   # noqa: E402,F401
@@ -54,19 +65,32 @@ from scripts.picko_eval import (load_model, predict, evaluate, confusion,   # no
 from needle.training.finetune import _per_tool_split                     # noqa: E402
 from needle.dataset.dataset import get_tokenizer                         # noqa: E402
 
-def _run_finetune(jsonl_path, epochs):
+def _run_finetune(jsonl_path, epochs, batch_size=16):
     """Run `needle finetune` robustly. Prefer the console script if present, else
     invoke needle.cli.main in a subprocess with the SAME Python (works on Colab
-    without `pip install -e .`, and inherits the GPU env)."""
+    without `pip install -e .`, and inherits the GPU/compile-cache env).
+
+    Captures output and re-raises with the real traceback tail on failure — a
+    subprocess writes to OS-level stderr, which Colab/Jupyter does NOT mirror into
+    the cell, so a plain check=True would hide the actual error (e.g. GPU OOM)."""
+    os.makedirs(os.environ.get("JAX_COMPILATION_CACHE_DIR", ""), exist_ok=True) \
+        if os.environ.get("JAX_COMPILATION_CACHE_DIR") else None
+    args = ["finetune", jsonl_path, "--epochs", str(epochs), "--batch-size", str(batch_size)]
     exe = shutil.which("needle")
     if exe:
-        subprocess.run([exe, "finetune", jsonl_path, "--epochs", str(epochs),
-                        "--batch-size", "32"], cwd=ROOT, check=True)
-        return
-    argv = ["finetune", jsonl_path, "--epochs", str(epochs), "--batch-size", "32"]
-    code = (f"import sys; sys.argv=['needle']+{argv!r}; "
-            "from needle.cli import main; main()")
-    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
+        cmd = [exe] + args
+    else:
+        code = (f"import sys; sys.argv=['needle']+{args!r}; "
+                "from needle.cli import main; main()")
+        cmd = [sys.executable, "-c", code]
+    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout or "").splitlines()[-45:])
+        raise RuntimeError(f"`needle finetune` failed (exit {proc.returncode}):\n{tail}")
+    for line in (proc.stdout or "").splitlines():   # brief summary on success
+        if line.startswith(("BASE_EVAL", "  Base:", "Best checkpoint", "Training complete")):
+            print("  " + line.strip())
 
 
 # ---- context ----
@@ -150,7 +174,7 @@ def sample_stratified(cat, names, tools_per_bucket, seed=0):
 def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
                       compact=False, offer_all=None, token_aware=False,
                       eval_subsample=None, run_train=True, force_retrain=False,
-                      max_gen_len=256, quiet_decode=True):
+                      max_gen_len=256, quiet_decode=True, batch_size=16):
     """Re-scope -> finetune (gated/resumable) -> copy stable checkpoint -> eval.
 
     `max_gen_len` caps decode length — short is much faster because weak models
@@ -175,7 +199,7 @@ def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
     ckpt = os.path.join(out_dir, f"picko_{tag}_best.pkl")
     if run_train and (force_retrain or not os.path.exists(ckpt)):
         print(f"[{tag}] finetuning on {len(data)} examples ({len(names)} tools)…", flush=True)
-        _run_finetune(path, epochs)
+        _run_finetune(path, epochs, batch_size=batch_size)
         newest = max(glob.glob(os.path.join(ROOT, "checkpoints", "needle_finetuned_*_best.pkl")),
                      key=os.path.getmtime)
         shutil.copy(newest, ckpt)
