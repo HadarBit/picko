@@ -55,8 +55,10 @@ if not _ON_COLAB:
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR",
                       "/content/jax_cache" if _ON_COLAB else os.path.join(ROOT, ".jax_cache"))
 if _ON_COLAB:
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")   # don't grab 75% of VRAM up front
-    os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")    # fewer fragmentation OOMs
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")     # don't grab 75% of VRAM up front
+    # cudaMalloc per allocation (releases between allocs) — critical because the notebook
+    # KERNEL and the finetune SUBPROCESS share the one GPU, so a retained pool fragments and OOMs.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
 
 from scripts.tool_catalog import Catalog, family_of                      # noqa: E402
 from scripts.research_sets import (FOCUS_FAMILIES, focus_names, BREADTH_SIZES,   # noqa: E402,F401
@@ -109,6 +111,9 @@ def env_report(out_dir=None):
     log(f"compile-cache={os.environ.get('JAX_COMPILATION_CACHE_DIR', '(off)')}")
     if not durable and _ON_COLAB:
         log("WARNING: OUT_DIR is not on Drive — checkpoints/results will be LOST on a runtime restart.")
+    if _ON_COLAB and plat != "gpu":
+        log("WARNING: JAX is on CPU, not GPU — training/eval will be ~30x slower (hours vs minutes). "
+            "Fix: Runtime > Change runtime type > GPU, then Restart session, and re-run the bootstrap cell.")
     return {"devices": [str(d) for d in devs], "platform": plat,
             "out_dir": out_dir, "durable": durable}
 

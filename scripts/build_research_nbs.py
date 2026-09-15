@@ -63,7 +63,13 @@ if IN_COLAB:
     print("GPU:");
     !nvidia-smi -L
     print("jax devices:", jax.devices())
-    print("bootstrap OK · data =", dst, "· OUT_DIR =", os.environ["PICKO_OUT_DIR"])
+    _plat = jax.devices()[0].platform
+    assert _plat == "gpu", (
+        f"JAX is running on '{_plat}', NOT the GPU — every finetune/eval will be ~30x slower "
+        "(hours instead of minutes). FIX: Runtime > Change runtime type > GPU (L4), then "
+        "Runtime > Restart session, and re-run this cell. If a GPU IS selected but this still "
+        "fails, the CUDA plugin didn't load — re-run the %pip line above, then restart.")
+    print("bootstrap OK · GPU active · data =", dst, "· OUT_DIR =", os.environ["PICKO_OUT_DIR"])
 else:
     print("Not on Colab — running locally (CPU).")''')
 
@@ -122,7 +128,7 @@ CAP_PER_TOOL   = 40      # examples/tool per finetune (raise to 120 for higher f
 EPOCHS         = 1
 EVAL_SUBSAMPLE = 30      # cap test examples per run for faster eval; None = full
 MAX_GEN_LEN    = 64      # short decode: we only score the tool NAME (salvaged by regex if JSON truncates)
-BATCH_SIZE     = 24      # finetune batch — good for L4 (24GB). Lower to 16/8 if you hit GPU OOM
+BATCH_SIZE     = 8       # finetune batch. 8 is safe on L4 (kernel + train subprocess share the GPU); raise to 16 if you have headroom, lower to 4 on OOM
 RUN_TRAIN      = True
 FORCE_RETRAIN  = False   # True = retrain even if a checkpoint exists
 
@@ -200,7 +206,7 @@ TOOLS_PER_BUCKET = 2     # tools drawn from each param bucket per iteration
 CAP_PER_TOOL     = 40
 EPOCHS           = 1
 EVAL_SUBSAMPLE   = 40
-BATCH_SIZE       = 24    # good for L4 (24GB); lower to 16/8 if you hit GPU OOM
+BATCH_SIZE       = 8     # safe on L4 (kernel + train subprocess share the GPU); raise to 16 if headroom, lower to 4 on OOM
 RUN_TRAIN        = True
 FORCE_RETRAIN    = False
 print("param buckets available:", tools_dataframe(cat, FOCUS)["param_bucket"].value_counts().to_dict())'''),
@@ -301,7 +307,7 @@ for g, tools in SIMILAR_GROUPS.items():
 groups_df = pd.DataFrame(grp_rows)
 display(groups_df)'''),
  md("## 3 · Train (or reuse) the 40-tool model\\nResumable: reuses `picko_focus40_best.pkl` from Drive if present."),
- co('''CAP_PER_TOOL, EPOCHS, EVAL_SUBSAMPLE, BATCH_SIZE = 40, 1, 40, 24   # BATCH_SIZE: lower to 16/8 on OOM
+ co('''CAP_PER_TOOL, EPOCHS, EVAL_SUBSAMPLE, BATCH_SIZE = 40, 1, 40, 8   # BATCH_SIZE: raise to 16 if headroom, lower to 4 on OOM
 RUN_TRAIN, FORCE_RETRAIN = True, False
 FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "focus40", OUT_DIR,
                             cap=CAP_PER_TOOL, epochs=EPOCHS, compact=False, token_aware=True,
