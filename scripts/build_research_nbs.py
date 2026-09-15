@@ -329,7 +329,7 @@ for gname, gtools in SIMILAR_GROUPS.items():
     try:
         log(f"=== group {gname} ({len(gtools)} tools) ===")
         gset = cat.restrict_dataset(raw, gtools, offer_all_max=len(gtools), cap_per_tool=CAP_PER_TOOL, seed=0)
-        _, _, gtest = _per_tool_split(gset)
+        _, _, gtest = per_tool_split(gset)
         if EVAL_SUBSAMPLE: gtest = gtest[:EVAL_SUBSAMPLE]
         gpreds = predict(m40, p40, tk40, gtest)
         gm = evaluate(gtest, gpreds, family_of=family_of)
@@ -342,6 +342,8 @@ for gname, gtools in SIMILAR_GROUPS.items():
         log(f"{gname}: FAILED ({type(e).__name__}: {e}) — skipping; re-run to resume")
 
 log(f"ALL GROUPS DONE in {time.time()-t_all:.0f}s · results={RES}")
+if not sep_by:
+    raise RuntimeError("No group succeeded — see the FAILED lines above (fix the error, then re-run).")
 separation = pd.DataFrame(list(sep_by.values())).sort_values("selection_acc")
 display(separation)
 

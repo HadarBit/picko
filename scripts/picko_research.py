@@ -69,6 +69,10 @@ from scripts.picko_eval import (load_model, predict, evaluate, confusion,   # no
 from needle.training.finetune import _per_tool_split                     # noqa: E402
 from needle.dataset.dataset import get_tokenizer                         # noqa: E402
 
+# public alias — `from scripts.picko_research import *` skips underscore names,
+# so notebooks that need the split must see it under a non-underscore name.
+per_tool_split = _per_tool_split
+
 
 # ---- observability (works the same locally and on Colab) ----
 def log(msg):
