@@ -227,6 +227,17 @@ def sample_stratified(cat, names, tools_per_bucket, seed=0):
     return chosen
 
 
+def offer_subset(cat, gold, pool, k, seed, compact=True):
+    """Compact-tools JSON of k tools from `pool` (gold included), shuffled; no token-fit so the 1024-tok encoder still truncates — that truncation is the Breadth signal."""
+    rng = random.Random(seed)
+    others = [n for n in pool if n != gold]
+    chosen = ([gold] if gold in pool else []) + rng.sample(others, min(max(k, 1) - (gold in pool), len(others)))
+    rng.shuffle(chosen)
+    tools = [({"name": t["name"], "description": t.get("description", "")} if compact else t)
+             for t in (cat.by_name[n] for n in chosen)]
+    return json.dumps(tools, separators=(",", ":"), ensure_ascii=False)
+
+
 # ---- finetune + eval (shared by NB1/NB2/NB3 and run_research.py) ----
 def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
                       compact=False, offer_all=None, token_aware=False,
