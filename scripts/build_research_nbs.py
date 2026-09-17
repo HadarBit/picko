@@ -590,6 +590,170 @@ harder half of the task, and that difficulty scales with the number of arguments
 ]
 
 
+# ======================================================================
+# NB3 V2 — Semantic separation: routing by DOMAIN without the source name
+# ======================================================================
+nb3v2 = [
+ md("""# PICKO Research · NB3 V2 — **Semantic separation**: can it route by *meaning* alone?"""),
+ BOOTSTRAP_MD, BOOTSTRAP, SETUP_MD, SETUP,
+ md("""## 2 · The question
+
+NB3 found look-alike **search** tools easy to tell apart across sources — but most training queries **name
+the source** (measured: 58–85% of `arxiv/pubmed/wikipedia` search queries contain the source word). So that
+result may reflect **lexical matching**, not understanding.
+
+**V2 isolates semantics.** We probe a pair that does the *same action* in *disjoint domains* —
+`arxiv_search_papers` (computer science) vs `pubmed_search_articles` (medicine) — with queries that
+**never name the source**, only the topic. Each query offers **both** tools (a forced 2-way choice, chance =
+50%); routing can only come from the domain meaning.
+
+To separate the two effects we test **two conditions on the same content**:
+- **unnamed** — domain only, no source word (the real semantic test);
+- **named** — the same query with a source phrase appended (a lexical-cue control, expected ≈ 100%).
+
+The gap between them measures how much PICKO leans on the source *word* vs the *meaning*. This uses the
+**already-trained** focus40 model — no training here — and the queries are freshly written, so none were
+seen in training."""),
+ md("## 3 · Configure"),
+ co('''NB_DIR = os.path.join(OUT_DIR, "nb3v2"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
+PAIR_TOOLS = ["arxiv_search_papers", "pubmed_search_articles"]   # forced 2-way choice, full schema
+CKPT_CANDIDATES = [os.path.join(OUT_DIR, "nb2v2", "picko_depth_focus40_best.pkl"),
+                   os.path.join(OUT_DIR, "nb3",   "picko_focus40_best.pkl"),
+                   os.path.join(OUT_DIR, "nb1",   "picko_breadth_focus40_best.pkl")]
+CKPT = next((c for c in CKPT_CANDIDATES if os.path.exists(c)), None)
+MAX_GEN_LEN = 64      # we only score tool SELECTION
+BATCH_SIZE  = 16
+N_BOOT      = 1000
+assert CKPT, f"no focus40 checkpoint found — run nb2v2 / nb3 / nb1 first. looked in: {CKPT_CANDIDATES}"
+print("checkpoint:", CKPT, "| pair:", PAIR_TOOLS, "| out:", NB_DIR)'''),
+ md("""## 4 · Build the probe set
+
+Reads the two domain query files (`cs_sematnic.json` → arxiv, `samentic_clinique.json` → pubmed), drops any
+query that still leaks a source name (safety net), and pairs each with a **named** control variant. Falls
+back to the prebuilt `picko_semantic_probe.jsonl` if the raw files aren't present."""),
+ co('''import re, collections, random as _rnd
+BANNED = r"\\b(arxiv|arxiv\\.org|pubmed|medline|ncbi|pmid|biorxiv|medrxiv|preprint|wikipedia|wiki|hugging\\s*face|huggingface|semantic scholar)\\b"
+DOMAIN = {"arxiv_search_papers": ("cs", "arXiv"), "pubmed_search_articles": ("medicine", "PubMed")}
+RAWFILE = {"arxiv_search_papers": "cs_sematnic.json", "pubmed_search_articles": "samentic_clinique.json"}
+
+def _find(name):
+    for root in [os.path.join(ROOT, "data"), "/content/drive/MyDrive/picko",
+                 "/content/drive/MyDrive/picko/data"]:
+        p = os.path.join(root, name)
+        if os.path.exists(p): return p
+    return None
+
+def _tools_json(seed):                       # offered pair (full schema), order randomised per row
+    ts = [cat.by_name[n] for n in PAIR_TOOLS]
+    _rnd.Random(seed).shuffle(ts)
+    return json.dumps(ts, separators=(",", ":"), ensure_ascii=False)
+
+raw_paths = {g: _find(f) for g, f in RAWFILE.items()}
+if all(raw_paths.values()):
+    rows, seen, i = [], set(), 0
+    for gold, (domain, src) in DOMAIN.items():
+        ans = json.dumps([{"name": gold, "arguments": {}}])
+        for q in json.load(open(raw_paths[gold])):
+            q = q.strip(); key = re.sub(r"\\W+", " ", q.lower()).strip()
+            if not q or key in seen or re.search(BANNED, q, re.I): continue
+            seen.add(key)                    # standard {query, tools, answers} + grouping metadata
+            rows.append({"query": q, "tools": _tools_json(i), "answers": ans,
+                         "gold": gold, "domain": domain, "condition": "unnamed"}); i += 1
+            rows.append({"query": f"{q} Please search {src}.", "tools": _tools_json(i), "answers": ans,
+                         "gold": gold, "domain": domain, "condition": "named"}); i += 1
+    pp = os.path.join(ROOT, "data", "picko_semantic_probe.jsonl")
+    with open(pp, "w") as f:
+        for r in rows: f.write(json.dumps(r, ensure_ascii=False) + "\\n")
+    log(f"built probe ({len(rows)} rows, {{query,tools,answers}} format) → {pp}")
+else:
+    pp = _find("picko_semantic_probe.jsonl")
+    if not pp: raise FileNotFoundError("need cs_sematnic.json + samentic_clinique.json (or picko_semantic_probe.jsonl) in data/ or Drive")
+    rows = [json.loads(l) for l in open(pp) if l.strip()]
+    log(f"loaded prebuilt probe: {len(rows)} rows from {pp}")
+
+probe = pd.DataFrame(rows)
+print("probe rows:", len(probe), "| by condition x gold:",
+      dict(collections.Counter(zip(probe["condition"], probe["gold"]))))
+display(probe.groupby(["condition", "domain"]).size().rename("n").reset_index())'''),
+ md("## 5 · Load the trained model & probe the pair\\nEach row already carries its offered pair (full schema, order randomised) in `tools`, so we decode directly and score tool selection only."),
+ co('''import contextlib, io
+model, params, tk = load_model(CKPT)
+examples = [{"query": r["query"], "tools": r["tools"], "answers": r["answers"]} for r in rows]
+with contextlib.redirect_stdout(io.StringIO()):
+    preds = predict(model, params, tk, examples, max_gen_len=MAX_GEN_LEN, batch=BATCH_SIZE)
+
+def _pred_name(t):
+    m = re.search(r'"name"\\s*:\\s*"([^"]+)"', t or "")
+    n = m.group(1) if m else "none"
+    return n if n in PAIR_TOOLS else ("other" if n != "none" else "none")
+
+res = probe.copy()
+res["pred"] = [_pred_name(p) for p in preds]
+res["correct"] = (res["pred"] == res["gold"]).astype(int)
+log(f"probed {len(res)} queries · overall selection={res['correct'].mean():.3f}")
+display(res.head(8))'''),
+ md("## 6 · Selection accuracy: unnamed (semantic) vs named (lexical control)"),
+ co('''def _boot_ci(v, n_boot=N_BOOT, seed=0):
+    rng = np.random.default_rng(seed); v = np.asarray(v)
+    if len(v) == 0: return (np.nan, np.nan)
+    b = [v[rng.integers(0, len(v), len(v))].mean() for _ in range(n_boot)]
+    return float(np.percentile(b, 2.5)), float(np.percentile(b, 97.5))
+
+agg = []
+for (cond, dom), d in res.groupby(["condition", "domain"]):
+    lo, hi = _boot_ci(d["correct"].values)
+    agg.append({"condition": cond, "domain": dom, "n": len(d),
+                "selection_acc": round(d["correct"].mean(), 4),
+                "ci_lo": round(lo, 4), "ci_hi": round(hi, 4)})
+agg = pd.DataFrame(agg)
+RES = os.path.join(NB_DIR, "semantic_results.json")
+json.dump({"pair": PAIR_TOOLS, "rows": agg.to_dict("records"),
+           "confusion_unnamed": {g: res[(res.condition=="unnamed") & (res.gold==g)]["pred"].value_counts().to_dict()
+                                 for g in PAIR_TOOLS}}, open(RES, "w"), indent=2)
+log(f"saved {RES}")
+display(agg)'''),
+ md("## 7 · Plot"),
+ co('''doms = sorted(res["domain"].unique()); conds = ["unnamed", "named"]
+x = np.arange(len(doms)); w = 0.38
+colors = {"unnamed": "#0072B2", "named": "#E69F00"}
+fig, (ax, ax2) = plt.subplots(1, 2, figsize=(12, 4.6), gridspec_kw={"width_ratios": [1.4, 1]})
+for j, cond in enumerate(conds):
+    vals = [agg[(agg.condition==cond) & (agg.domain==d)]["selection_acc"].iloc[0] for d in doms]
+    lo = [vals[k]-agg[(agg.condition==cond) & (agg.domain==doms[k])]["ci_lo"].iloc[0] for k in range(len(doms))]
+    hi = [agg[(agg.condition==cond) & (agg.domain==doms[k])]["ci_hi"].iloc[0]-vals[k] for k in range(len(doms))]
+    ax.bar(x+(j-0.5)*w, vals, w, yerr=[lo, hi], capsize=3, color=colors[cond],
+           edgecolor="white", lw=0.6, label=cond, error_kw=dict(lw=1, ecolor="#444"))
+    for k, v in enumerate(vals): ax.text(x[k]+(j-0.5)*w, min(v+0.03, 1.03), f"{v:.2f}", ha="center", fontsize=9)
+ax.axhline(0.5, color="#C44E52", ls="--", lw=1.2, label="chance (2-way)")
+ax.set_xticks(x); ax.set_xticklabels([f"{d}\\n(→ {PAIR_TOOLS[0] if d=='cs' else PAIR_TOOLS[1]})" for d in doms])
+ax.set_ylim(0, 1.08); ax.set_ylabel("Tool-selection accuracy")
+ax.set_title("Impact of the Source Name on Semantic Tool Routing"); ax.legend(loc="lower right")
+if sns: sns.despine(ax=ax)
+ax.grid(axis="y", color="#cccccc", lw=0.6, alpha=0.6); ax.set_axisbelow(True)
+
+# confusion for the unnamed (semantic) condition
+u = res[res.condition == "unnamed"]
+labels = PAIR_TOOLS + (["other", "none"] if u["pred"].isin(["other", "none"]).any() else [])
+M = pd.DataFrame(0, index=PAIR_TOOLS, columns=labels)
+for g in PAIR_TOOLS:
+    for p, c in u[u.gold==g]["pred"].value_counts().items(): M.loc[g, p] = c
+short = lambda n: n.replace("_search_papers", "").replace("_search_articles", "")
+if sns:
+    sns.heatmap(M.div(M.sum(1).replace(0,1), axis=0), cmap="Blues", vmin=0, vmax=1, cbar=False,
+                annot=M.values, fmt="d", linewidths=0.5, linecolor="white", ax=ax2,
+                xticklabels=[short(c) for c in M.columns], yticklabels=[short(r) for r in M.index])
+ax2.set_title("Unnamed condition: where queries route"); ax2.set_xlabel("predicted"); ax2.set_ylabel("true domain tool")
+plt.tight_layout(); save_fig("semantic_separation", out_dir=NB_DIR); plt.show()'''),
+ md("""## 8 · Read-out
+
+Offered only the two same-action tools, the model must route on the query's domain alone. In the **named**
+condition accuracy is near-ceiling (the source word is a giveaway); the **unnamed** condition is the honest
+semantic test — if it stays well above the 50% chance line, PICKO genuinely routes by meaning, and the
+named-vs-unnamed gap quantifies how much it otherwise leans on the literal source name. The confusion panel
+shows whether errors are symmetric or collapse toward one domain."""),
+]
+
+
 def write(cells, name):
     for j, c in enumerate(cells):
         c["id"] = f"c{j:02d}"
@@ -608,3 +772,4 @@ if __name__ == "__main__":
     write(nb2, "nb2_depth_parameters.ipynb")
     write(nb2v2, "nb2v2_depth_by_example.ipynb")
     write(nb3, "nb3_separation_ambiguous.ipynb")
+    write(nb3v2, "nb3v2_semantic_separation.ipynb")
