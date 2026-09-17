@@ -280,6 +280,7 @@ def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
     assert os.path.exists(ckpt), f"missing {ckpt} — run with run_train=True first"
 
     _, _, test = _per_tool_split(data)
+    random.Random(0).shuffle(test)   # per_tool_split returns test grouped by tool; shuffle so eval_subsample spans all tools
     if eval_subsample:
         test = test[:eval_subsample]
     t1 = time.time()

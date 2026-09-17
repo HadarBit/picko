@@ -131,7 +131,7 @@ BREADTH_SIZES  = [3, 5, 10, 20, 30, 40]   # tools offered per query at inference
 N_REPEATS      = 8                        # random subsets averaged per size (mean +/- std)
 CAP_PER_TOOL   = 120                       # examples/tool -> 100 train / 10 val / 10 test
 EPOCHS         = 1
-EVAL_SUBSAMPLE = 60                        # test queries per (size, repeat); None = full
+EVAL_SUBSAMPLE = 100                       # test queries per (size, repeat), sampled across all tools; None = full
 MAX_GEN_LEN    = 64
 BATCH_SIZE     = 8                         # lower to 4 on OOM, raise to 16 if headroom
 RUN_TRAIN      = True
