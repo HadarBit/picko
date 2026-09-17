@@ -244,23 +244,30 @@ def offer_subset(cat, gold, pool, k, seed, compact=True):
 def finetune_and_eval(cat, raw, tok, names, tag, out_dir, *, cap=40, epochs=1,
                       compact=False, offer_all=None, token_aware=False,
                       eval_subsample=None, run_train=True, force_retrain=False,
-                      max_gen_len=256, quiet_decode=True, batch_size=16):
+                      max_gen_len=256, quiet_decode=True, batch_size=16,
+                      dataset=None):
     """Re-scope -> finetune (gated/resumable) -> copy stable checkpoint -> eval.
 
     `max_gen_len` caps decode length — short is much faster because weak models
     otherwise generate to the cap. Selection is recovered by regex even if a short
     cap truncates the JSON (see picko_eval._salvage), so Breadth can use ~64.
     `quiet_decode` silences needle's constrained-decoder prints (thousands of lines
-    that slow Colab). Returns {names, ckpt, bundle, test, preds, metrics, data}.
+    that slow Colab). `dataset` (list of {query,tools,answers}) trains on a prebuilt
+    set instead of `restrict_dataset(raw, names)` — the same deterministic
+    per_tool_split still holds out its test rows. Returns {names, ckpt, bundle,
+    test, preds, metrics, data}.
     """
     import contextlib
     import io
-    kw = dict(cap_per_tool=cap, compact=compact, seed=0)
-    if offer_all is not None:
-        kw["offer_all_max"] = offer_all
-    if token_aware:
-        kw["tokenizer"] = tok
-    data = cat.restrict_dataset(raw, names, **kw)
+    if dataset is not None:
+        data = list(dataset)
+    else:
+        kw = dict(cap_per_tool=cap, compact=compact, seed=0)
+        if offer_all is not None:
+            kw["offer_all_max"] = offer_all
+        if token_aware:
+            kw["tokenizer"] = tok
+        data = cat.restrict_dataset(raw, names, **kw)
     path = os.path.join(ROOT, "data", f"picko_{tag}.jsonl")
     with open(path, "w") as f:
         for e in data:
