@@ -323,15 +323,33 @@ nb3 += [
 Both the training subprocess and this notebook call the **same deterministic** `per_tool_split`
 (`seed=42`, 10 test + 10 val per tool). The model trains **only on the train split**; the group probes
 below run **only on the held-out test split**, so no test query is ever seen in training."""),
- md("## 3 · The ambiguous groups"),
- co('''grp_rows = []
+ md("""## 3 · The ambiguous groups
+
+Each group is a set of look-alike tools on one of two axes: **cross-source** (same action, different
+source — the source word disambiguates) or **within-source** (same source, subtly different action)."""),
+ co('''AXIS = {"cross_source_search": "cross-source", "single_item_summary": "cross-source",
+        "hf_search_variants": "within-source", "wikipedia_retrieve_vs_summarize": "within-source",
+        "get_paper_content": "within-source", "arxiv_latex": "within-source"}
+grp_rows = []
 for g, tools in SIMILAR_GROUPS.items():
     fams = sorted({family_of(t) for t in tools})
-    buckets = sorted({param_bucket(cat.params_of(t)[1]) for t in tools})
-    grp_rows.append({"group": g, "n_tools": len(tools), "families": ",".join(fams),
-                     "param_buckets": ",".join(buckets), "tools": ", ".join(tools)})
-groups_df = pd.DataFrame(grp_rows)
+    grp_rows.append({"group": g, "axis": AXIS.get(g, ""), "n_tools": len(tools),
+                     "families": ",".join(fams), "tools": ", ".join(tools)})
+groups_df = pd.DataFrame(grp_rows).sort_values("axis")
 display(groups_df)'''),
+ md("### Sample queries per tool\\nThe actual requests the model must tell apart — one example query per tool, grouped."),
+ co('''def gold_of(ex):
+    calls = json.loads(ex.get("answers", "[]"))
+    return next((c["name"] for c in calls if isinstance(c, dict) and c.get("name")), None)
+
+sample_q = {}
+for e in raw:
+    g = gold_of(e)
+    if g and g not in sample_q: sample_q[g] = e["query"]
+
+ex_rows = [{"group": g, "axis": AXIS.get(g, ""), "tool": t, "example_query": sample_q.get(t, "")[:160]}
+           for g, tools in SIMILAR_GROUPS.items() for t in tools]
+display(pd.DataFrame(ex_rows))'''),
  md("## 4 · Train the model (40 focus tools)\\nTrained once to Drive and reused; the returned `test` set is the held-out split the group probes run on."),
  co('''NB_DIR = os.path.join(OUT_DIR, "nb3"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
 CAP_PER_TOOL, EPOCHS, BATCH_SIZE = 120, 1, 8   # examples/tool -> 100 train / 10 val / 10 test; BATCH_SIZE: lower to 4 on OOM
