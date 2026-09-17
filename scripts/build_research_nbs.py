@@ -311,14 +311,17 @@ model. This is where a small specialist model needs the most help (and where fin
 # ======================================================================
 nb3 = init_cells("""# PICKO Research · NB3 — **Separation**: can it tell look-alike tools apart?
 
-Train one **40-tool model**, then probe curated groups of near-identical tools (same action across
-sources, or same source across actions). Each group is small enough to offer in full at inference, so we
-measure pure disambiguation + which tool it confuses for which.
-
-*Run & forget:* the 40-tool model trains once to Drive and is reused; a restart **skips finished groups**
-(`picko_out/separation_results.json`).""")
+We finetune one model on the 40 focus tools and probe curated groups of near-identical tools (same action
+across sources, or same source across actions). Each group's queries are drawn from the model's **held-out
+test set** and offered the full group in one shot, so we measure pure disambiguation + which tool it
+confuses for which.""")
 nb3 += [
- md("## 2 · The ambiguous groups"),
+ md("""## 2 · Train / test split
+
+Both the training subprocess and this notebook call the **same deterministic** `per_tool_split`
+(`seed=42`, 10 test + 10 val per tool). The model trains **only on the train split**; the group probes
+below run **only on the held-out test split**, so no test query is ever seen in training."""),
+ md("## 3 · The ambiguous groups"),
  co('''grp_rows = []
 for g, tools in SIMILAR_GROUPS.items():
     fams = sorted({family_of(t) for t in tools})
@@ -327,51 +330,57 @@ for g, tools in SIMILAR_GROUPS.items():
                      "param_buckets": ",".join(buckets), "tools": ", ".join(tools)})
 groups_df = pd.DataFrame(grp_rows)
 display(groups_df)'''),
- md("## 3 · Train (or reuse) the 40-tool model\\nResumable: reuses `picko_focus40_best.pkl` from Drive if present."),
- co('''CAP_PER_TOOL, EPOCHS, EVAL_SUBSAMPLE, BATCH_SIZE = 40, 1, 40, 8   # BATCH_SIZE: raise to 16 if headroom, lower to 4 on OOM
+ md("## 4 · Train the model (40 focus tools)\\nTrained once to Drive and reused; the returned `test` set is the held-out split the group probes run on."),
+ co('''CAP_PER_TOOL, EPOCHS, BATCH_SIZE = 40, 1, 8   # BATCH_SIZE: lower to 4 on OOM, raise to 16 if headroom
 RUN_TRAIN, FORCE_RETRAIN = True, False
 FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "focus40", OUT_DIR,
                             cap=CAP_PER_TOOL, epochs=EPOCHS, compact=False, token_aware=True,
-                            eval_subsample=EVAL_SUBSAMPLE, run_train=RUN_TRAIN,
+                            eval_subsample=None, run_train=RUN_TRAIN,
                             force_retrain=FORCE_RETRAIN, batch_size=BATCH_SIZE)
 m40, p40, tk40 = FOCUS40["bundle"]
-log(f"focus40 overall selection_acc={FOCUS40['metrics']['selection_acc']:.3f}")'''),
- md("## 4 · Per-group disambiguation\\n*Resumable:* finished groups are skipped; results persist per group to `OUT_DIR/separation_results.json`."),
- co('''RES = os.path.join(OUT_DIR, "separation_results.json")
+TEST = FOCUS40["test"]                     # held-out test queries (never trained on)
+log(f"focus40 selection_acc={FOCUS40['metrics']['selection_acc']:.3f} · held-out test={len(TEST)}")'''),
+ md("## 5 · Per-group disambiguation\\nFor each group we take the held-out queries whose gold tool is in the group and offer the full group. Resumable: finished groups persist to `separation_results.json`."),
+ co('''import contextlib, io
+RES = os.path.join(OUT_DIR, "separation_results.json")
 prev = json.load(open(RES)) if (os.path.exists(RES) and not FORCE_RETRAIN) else {"per_group": [], "confusion": {}}
 sep_by = {r["group"]: r for r in prev.get("per_group", [])}
 group_conf = prev.get("confusion", {})
-if sep_by: log(f"loaded {len(sep_by)} finished group(s) from {RES}")
+if sep_by: log(f"resumed {len(sep_by)} finished group(s)")
+
+def gold_of(ex):
+    calls = json.loads(ex.get("answers", "[]"))
+    return next((c["name"] for c in calls if isinstance(c, dict) and c.get("name")), None)
 
 t_all = time.time()
 for gname, gtools in SIMILAR_GROUPS.items():
     if gname in sep_by and gname in group_conf and not FORCE_RETRAIN:
-        log(f"{gname}: skip (already done) — selection={sep_by[gname]['selection_acc']:.3f}"); continue
+        log(f"{gname}: skip (done)"); continue
     try:
-        log(f"=== group {gname} ({len(gtools)} tools) ===")
-        gset = cat.restrict_dataset(raw, gtools, offer_all_max=len(gtools), cap_per_tool=CAP_PER_TOOL, seed=0)
-        _, _, gtest = per_tool_split(gset)
-        if EVAL_SUBSAMPLE: gtest = gtest[:EVAL_SUBSAMPLE]
-        gpreds = predict(m40, p40, tk40, gtest)
+        gset = set(gtools)
+        gtest = [e for e in TEST if gold_of(e) in gset]                      # held-out queries for this group
+        offered = [offer_subset(cat, gold_of(e), gtools, len(gtools), seed=0, compact=False) for e in gtest]
+        with contextlib.redirect_stdout(io.StringIO()):
+            gpreds = predict(m40, p40, tk40, gtest, tools_override=offered)
         gm = evaluate(gtest, gpreds, family_of=family_of)
         sep_by[gname] = {"group": gname, "n_tools": len(gtools), "n": gm["n"],
                          "selection_acc": gm["selection_acc"], "name_f1": gm["name_f1"]}
         group_conf[gname] = confusion(gtest, gpreds)
         json.dump({"per_group": list(sep_by.values()), "confusion": group_conf}, open(RES, "w"), indent=2)
-        log(f"=== done {gname}: selection={gm['selection_acc']:.3f} ===")
+        log(f"{gname}: selection={gm['selection_acc']:.3f} (n={gm['n']})")
     except Exception as e:
-        log(f"{gname}: FAILED ({type(e).__name__}: {e}) — skipping; re-run to resume")
+        log(f"{gname}: FAILED ({type(e).__name__}: {e})")
 
 log(f"ALL GROUPS DONE in {time.time()-t_all:.0f}s · results={RES}")
 if not sep_by:
-    raise RuntimeError("No group succeeded — see the FAILED lines above (fix the error, then re-run).")
+    raise RuntimeError("No group succeeded — see the FAILED lines above.")
 separation = pd.DataFrame(list(sep_by.values())).sort_values("selection_acc")
 display(separation)
 
 plt.figure(figsize=(8,4)); plt.barh(separation["group"], separation["selection_acc"], color="#4C72B0")
 plt.xlim(0,1); plt.xlabel("tool-selection accuracy"); plt.title("Separation: hardest look-alike groups (lower = more confused)")
 plt.tight_layout(); save_fig("separation_groups"); plt.show()'''),
- md("## 5 · Confusion heatmaps (who gets mistaken for whom)"),
+ md("## 6 · Confusion heatmaps (who gets mistaken for whom)"),
  co('''for gname, conf in group_conf.items():
     labels = sorted(set(conf) | {p for row in conf.values() for p in row})
     M = pd.DataFrame(0, index=sorted(conf), columns=labels)
@@ -383,7 +392,7 @@ plt.tight_layout(); save_fig("separation_groups"); plt.show()'''),
         plt.imshow(M.values, cmap="Blues"); plt.xticks(range(len(labels)), labels, rotation=90); plt.yticks(range(len(M)), M.index)
     plt.title(f"Separation · {gname}"); plt.xlabel("predicted"); plt.ylabel("reference")
     plt.tight_layout(); save_fig(f"separation_confusion_{gname}"); plt.show()'''),
- md("""## 6 · Read-out
+ md("""## 7 · Read-out
 
 Residual selection errors concentrate inside these look-alike groups. The lowest-accuracy group is the
 frontier for a tool-picker; the heatmaps show whether confusions are symmetric (two tools mutually
