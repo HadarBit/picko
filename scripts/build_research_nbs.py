@@ -114,77 +114,104 @@ def init_cells(title_md):
 # ======================================================================
 nb1 = init_cells("""# PICKO Research · NB1 — **Breadth**: how many tools before it breaks?
 
-Finetune a **separate model per tool-set size** (nested), offer tools in **compact** form
-(name + description, no parameters — so more names fit the encoder), and measure **tool selection only**.
-The 1024-token encoder truncates the offered list, so past ~20 tools some are never seen — that ceiling
-is the result, annotated with `n_visible`.
+**One** model is finetuned on all 40 focus tools (offered **compact**: name + description, no params — so
+more names fit the encoder). Then we **only run inference**: for each tool-count `k` we offer the model
+**`N_REPEATS` random subsets of `k` tools** and average the tool-selection accuracy (mean ± std). Training
+is held fixed, so the curve isolates one variable — *how many tools are offered at inference* — and the
+error bars remove the "unlucky tool sample" bias of testing each size once.
 
-*Run & forget:* each size trains once, its checkpoint + the running results land in Drive, and re-running
-after a restart **skips finished sizes**. Watch progress in the cell output or in `picko_out/run.log`.""")
+The 1024-token encoder truncates the offered list, so past ~20 compact tools some are never seen — that
+ceiling is the result, annotated with `n_visible`.
+
+*Run & forget:* the 40-tool model trains once to Drive and is reused; every (size, repeat) inference run
+persists to `picko_out/breadth_results.json`, so a restart **skips finished runs**.""")
 nb1 += [
- md("## 2 · Configure the sweep\\nEdit `BREADTH_SIZES` to change the tool counts tested. Sizes ≤ 40 stay inside the focus; larger sizes pull extra tools from the full 75-catalog."),
- co('''BREADTH_SIZES  = [3, 5, 10, 20, 30, 40]   # <- edit me
-CAP_PER_TOOL   = 40      # examples/tool per finetune (raise to 120 for higher fidelity)
+ md("## 2 · Configure the sweep\\n`BREADTH_SIZES` = how many tools are **offered** at inference. `N_REPEATS` = how many random tool subsets we average per size (more = smoother curve, tighter error bars)."),
+ co('''BREADTH_SIZES  = [3, 5, 10, 20, 30, 40]   # tool counts OFFERED at inference (<-edit me)
+N_REPEATS      = 8       # random tool subsets averaged per size -> mean +/- std (raise for a smoother curve)
+CAP_PER_TOOL   = 40      # examples/tool used to build the model and the test sets
 EPOCHS         = 1
-EVAL_SUBSAMPLE = 30      # cap test examples per run for faster eval; None = full
+EVAL_SUBSAMPLE = 60      # cap test examples per (size, repeat) for speed; None = full
 MAX_GEN_LEN    = 64      # short decode: we only score the tool NAME (salvaged by regex if JSON truncates)
-BATCH_SIZE     = 8       # finetune batch. 8 is safe on L4 (kernel + train subprocess share the GPU); raise to 16 if you have headroom, lower to 4 on OOM
+BATCH_SIZE     = 8       # finetune batch for the ONE model. 8 is safe on L4; raise to 16 if headroom, lower to 4 on OOM
 RUN_TRAIN      = True
-FORCE_RETRAIN  = False   # True = retrain even if a checkpoint exists
-
-pool = breadth_pool(cat, FOCUS, seed=0)
-SETS = size_sets(pool, BREADTH_SIZES)
-print({k: len(v) for k, v in SETS.items()})'''),
- md("## 3 · Finetune per size & evaluate selection\\n*Resumable:* finished sizes (checkpoint + result present) are skipped. Results persist to `OUT_DIR/breadth_results.json` after **every** size."),
- co('''RES = os.path.join(OUT_DIR, "breadth_results.json")
-done = {}
-if os.path.exists(RES) and not FORCE_RETRAIN:
-    for r in json.load(open(RES)): done[r["k"]] = r
-    log(f"loaded {len(done)} finished size(s) from {RES}")
+FORCE_RETRAIN  = False   # True = retrain the model AND recompute every inference run
+print("focus tools:", len(FOCUS), "| sizes:", BREADTH_SIZES, "| repeats/size:", N_REPEATS)'''),
+ md("## 3 · Train the ONE model (all 40 focus tools, compact)\\nTrained once and reused. Every size below is inference-only on **this same model** — so differences come from the *offered* tool count, not from retraining."),
+ co('''FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "breadth_focus40", OUT_DIR,
+                            cap=CAP_PER_TOOL, epochs=EPOCHS, compact=True, offer_all=len(FOCUS),
+                            eval_subsample=EVAL_SUBSAMPLE, run_train=RUN_TRAIN,
+                            force_retrain=FORCE_RETRAIN, max_gen_len=MAX_GEN_LEN, batch_size=BATCH_SIZE)
+m40, p40, tk40 = FOCUS40["bundle"]
+log(f"breadth model ready · trained-on-40 selection={FOCUS40['metrics']['selection_acc']:.3f}")'''),
+ md("## 4 · Sweep: offer k random tools, repeat, average\\n*Inference only* (no training here). *Resumable:* finished (size, repeat) pairs are skipped; results persist to `OUT_DIR/breadth_results.json` after **every** run."),
+ co('''import contextlib, io, random as _random
+RES = os.path.join(OUT_DIR, "breadth_results.json")
+rows = json.load(open(RES)) if (os.path.exists(RES) and not FORCE_RETRAIN) else []
+done = {(r["k"], r["repeat"]) for r in rows}
+if done: log(f"loaded {len(done)} finished (size,repeat) run(s) from {RES}")
 
 t_all = time.time()
 for k in BREADTH_SIZES:
-    ckpt = os.path.join(OUT_DIR, f"picko_breadth_k{k}_best.pkl")
-    if (k in done) and os.path.exists(ckpt) and not FORCE_RETRAIN:
-        log(f"k={k}: skip (already done) — selection={done[k]['selection_acc']:.3f}")
-        continue
-    try:
-        log(f"=== start k={k} ({len(SETS[k])} tools) ===")
-        R = finetune_and_eval(cat, raw, tok, SETS[k], f"breadth_k{k}", OUT_DIR,
-                              cap=CAP_PER_TOOL, epochs=EPOCHS, compact=True, offer_all=k,
-                              eval_subsample=EVAL_SUBSAMPLE, run_train=RUN_TRAIN,
-                              force_retrain=FORCE_RETRAIN, max_gen_len=MAX_GEN_LEN,
-                              batch_size=BATCH_SIZE)
-        vis = int(np.median([n_visible(e["query"], json.loads(e["tools"]), tok) for e in R["test"]]))
-        done[k] = {"k": k, "selection_acc": R["metrics"]["selection_acc"],
-                   "name_f1": R["metrics"]["name_f1"], "parse_rate": R["metrics"]["parse_rate"],
-                   "n_visible": vis, "n_test": len(R["test"])}
-        json.dump([done[x] for x in sorted(done)], open(RES, "w"), indent=2)  # persist each step
-        log(f"=== done k={k}: selection={done[k]['selection_acc']:.3f} visible={vis}/{k} ===")
-    except Exception as e:
-        log(f"k={k}: FAILED ({type(e).__name__}: {e}) — skipping; re-run to resume this size")
+    for rep in range(N_REPEATS):
+        if (k, rep) in done and not FORCE_RETRAIN:
+            continue
+        try:
+            # random subset of k focus tools for this repeat (seed=k*1000+rep -> reproducible)
+            names = _random.Random(k*1000+rep).sample(list(FOCUS), min(k, len(FOCUS)))
+            gset = cat.restrict_dataset(raw, names, compact=True, offer_all_max=k,
+                                        cap_per_tool=CAP_PER_TOOL, seed=rep)
+            _, _, test = per_tool_split(gset)
+            if EVAL_SUBSAMPLE: test = test[:EVAL_SUBSAMPLE]
+            with contextlib.redirect_stdout(io.StringIO()):   # silence constrained-decoder spam
+                preds = predict(m40, p40, tk40, test, max_gen_len=MAX_GEN_LEN)
+            met = evaluate(test, preds, family_of=family_of)
+            vis = int(np.median([n_visible(e["query"], json.loads(e["tools"]), tok) for e in test]))
+            rows = [r for r in rows if not (r["k"] == k and r["repeat"] == rep)] + [{
+                "k": k, "repeat": rep, "selection_acc": met["selection_acc"],
+                "name_f1": met["name_f1"], "parse_rate": met["parse_rate"],
+                "n_visible": vis, "n_test": len(test)}]
+            done.add((k, rep))
+            json.dump(rows, open(RES, "w"), indent=2)   # persist each run
+            log(f"k={k} rep={rep}: selection={met['selection_acc']:.3f} visible={vis}/{k}")
+        except Exception as e:
+            log(f"k={k} rep={rep}: FAILED ({type(e).__name__}: {e}) — skipping; re-run to resume")
 
-log(f"ALL SIZES DONE in {time.time()-t_all:.0f}s · results={RES}")
-breadth = pd.DataFrame([done[x] for x in sorted(done)])
-display(breadth)'''),
- md("## 4 · The Breadth curve"),
+log(f"ALL RUNS DONE in {time.time()-t_all:.0f}s · results={RES}")
+runs = pd.DataFrame(rows)
+# aggregate the repeats -> one row per size, mean +/- std
+breadth = (runs.groupby("k")
+           .agg(selection_mean=("selection_acc", "mean"), selection_std=("selection_acc", "std"),
+                name_f1_mean=("name_f1", "mean"), parse_rate=("parse_rate", "mean"),
+                n_visible=("n_visible", "median"), n_repeats=("repeat", "nunique"),
+                n_test=("n_test", "sum"))
+           .reset_index())
+breadth["selection_std"] = breadth["selection_std"].fillna(0)
+display(breadth.round(3))'''),
+ md("## 5 · The Breadth curve (mean ± std over random tool subsets)"),
  co('''fig, ax = plt.subplots(figsize=(8,4.5))
-ax.plot(breadth["k"], breadth["selection_acc"], "o-", color="#4C72B0", label="selection_acc")
-ax.plot(breadth["k"], breadth["name_f1"], "s--", color="#55A868", label="name_f1")
+ax.errorbar(breadth["k"], breadth["selection_mean"], yerr=breadth["selection_std"],
+            fmt="o-", color="#4C72B0", capsize=4, label="selection_acc (mean +/- std)")
+# faint dots: every individual repeat, to show the spread we are averaging over
+ax.scatter(runs["k"], runs["selection_acc"], s=12, color="#4C72B0", alpha=0.25, zorder=1)
 wall = breadth[breadth["n_visible"] < breadth["k"]]
 if len(wall):
     kw = int(wall["k"].iloc[0]); vw = int(wall["n_visible"].iloc[0])
     ax.axvline(kw, color="#C44E52", ls=":", lw=1.5)
     ax.text(kw, 0.06, f" truncation wall\\n (~{vw} of {kw} tools visible)", color="#C44E52", fontsize=9, va="bottom")
-ax.set_xlabel("# tools trained / offered (k)"); ax.set_ylabel("tool-selection accuracy")
-ax.set_ylim(0,1.02); ax.set_title("Breadth: selection accuracy vs tool-set size"); ax.legend()
+ax.set_xlabel("# tools offered at inference (k)"); ax.set_ylabel("tool-selection accuracy")
+ax.set_ylim(0,1.02); ax.set_title(f"Breadth: selection vs #tools offered ({int(breadth['n_repeats'].max())} random subsets/size)")
+ax.legend()
 plt.tight_layout(); save_fig("breadth_curve"); plt.show()'''),
- md("""## 5 · Read-out
+ md("""## 6 · Read-out
 
-- Selection holds up to ~`k` tools then drops; the red line marks where the **compact** offered list stops
-  fitting the 1024-token encoder (so the extra tools are truncated away and can't be picked).
-- **Takeaway:** one PICKO instance is bounded by the *context window*, not raw capacity — beyond the wall,
-  a large tool set should be sharded across categorical instances."""),
+- **One** model (trained on all 40 tools) is probed with random subsets of `k`, so the curve reflects the
+  *offered* tool count alone, not retraining. The error bars / faint dots show the spread across subsets —
+  a single sample per size (the old design) could land anywhere inside that band, which is the bias we removed.
+- Selection stays high for small `k` and falls as `k` grows; the red line marks where the **compact**
+  offered list stops fitting the 1024-token encoder (extra tools are truncated away and can't be picked).
+- **Takeaway:** one PICKO instance is bounded by the *context window it can offer*, not by what it was
+  trained on — beyond the wall, a large tool set should be sharded across categorical instances."""),
 ]
 
 # ======================================================================
