@@ -199,6 +199,43 @@ def evaluate(examples, pred_texts, family_of=None):
     }
 
 
+def evaluate_per_example(examples, pred_texts):
+    """One scored row per non-abstention example — the raw material for bucketing
+    the test set by any per-example property (e.g. #args). Mirrors `evaluate`'s
+    logic but keeps the per-example counts instead of aggregating.
+
+    Row: {ref_tool, selected, args_exact, p_tp, p_fp, p_fn}
+      selected    predicted primary name == reference primary name
+      args_exact  (only if selected) predicted args dict == reference args dict
+      p_tp/fp/fn  (only if selected) per-parameter value-match counts, so a bucket's
+                  param_f1 is a micro-average: f1(sum tp, sum fp, sum fn).
+    """
+    rows = []
+    for ex, ptext in zip(examples, pred_texts):
+        ref = _parse(ex.get("answers", "[]")) or []
+        rp = _primary(ref)
+        if not rp:                                   # abstention example — skip
+            continue
+        strict = _parse(ptext)
+        pred = strict if strict is not None else _salvage(ptext)
+        pp = _primary(pred)
+        selected = bool(pp) and pp["name"] == rp["name"]
+        row = {"ref_tool": rp["name"], "selected": int(selected),
+               "args_exact": 0, "p_tp": 0, "p_fp": 0, "p_fn": 0}
+        if selected:
+            rargs, pargs = _args(rp), _args(pp)
+            row["args_exact"] = int(
+                json.dumps(rargs, sort_keys=True) == json.dumps(pargs, sort_keys=True))
+            for k, v in rargs.items():
+                if k in pargs and json.dumps(pargs[k], sort_keys=True) == json.dumps(v, sort_keys=True):
+                    row["p_tp"] += 1
+                else:
+                    row["p_fn"] += 1
+            row["p_fp"] += sum(1 for k in pargs if k not in rargs)
+        rows.append(row)
+    return rows
+
+
 def confusion(examples, pred_texts):
     """{ref_tool: {pred_tool_or_'∅'/'?': count}} over non-abstention examples (D3)."""
     mat = {}

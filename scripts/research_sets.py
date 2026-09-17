@@ -107,6 +107,37 @@ def param_bucket(total):
 PARAM_BUCKET_ORDER = ["0", "1", "2-3", "4+"]
 
 
+def nargs_bucket(k):
+    """Bucket an example by how many arguments its gold answer actually supplies.
+    This is what the extraction metrics grade against (unlike the tool's total/
+    required schema size), so it is the honest per-example difficulty axis."""
+    if k <= 0:
+        return "0"
+    if k == 1:
+        return "1"
+    if k == 2:
+        return "2"
+    return "3+"
+
+
+NARGS_BUCKET_ORDER = ["0", "1", "2", "3+"]
+
+
+def gold_n_args(ex):
+    """Number of arguments the gold (primary) call in `ex` supplies; 0 if none."""
+    import json
+    try:
+        calls = json.loads(ex.get("answers", "[]"))
+    except (ValueError, TypeError):
+        return 0
+    primary = next((c for c in calls
+                    if isinstance(c, dict) and c.get("name")), None)
+    if not primary:
+        return 0
+    args = primary.get("arguments", {})
+    return len(args) if isinstance(args, dict) else 0
+
+
 if __name__ == "__main__":
     import os
     import sys

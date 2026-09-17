@@ -63,9 +63,11 @@ if _ON_COLAB:
 from scripts.tool_catalog import Catalog, family_of                      # noqa: E402
 from scripts.research_sets import (FOCUS_FAMILIES, focus_names, BREADTH_SIZES,   # noqa: E402,F401
                                    nested_sets, breadth_pool, size_sets,
-                                   SIMILAR_GROUPS, param_bucket, PARAM_BUCKET_ORDER)
+                                   SIMILAR_GROUPS, param_bucket, PARAM_BUCKET_ORDER,
+                                   nargs_bucket, NARGS_BUCKET_ORDER, gold_n_args)
 from scripts.picko_eval import (load_model, predict, evaluate, confusion,   # noqa: E402,F401
-                                base_checkpoint, tools_token_len, n_visible)
+                                evaluate_per_example, base_checkpoint,
+                                tools_token_len, n_visible)
 from needle.training.finetune import _per_tool_split                     # noqa: E402
 from needle.dataset.dataset import get_tokenizer                         # noqa: E402
 

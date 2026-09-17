@@ -421,6 +421,175 @@ confused) or a sink (everything collapses to one generic tool)."""),
 ]
 
 
+# ======================================================================
+# NB2 V2 — Depth by EXAMPLE (#args), one focus40 model
+# ======================================================================
+nb2v2 = [
+ md("""# PICKO Research · NB2 V2 — **Depth by example**: does extraction degrade with more *arguments*?"""),
+ BOOTSTRAP_MD, BOOTSTRAP, SETUP_MD, SETUP, DF1_MD, DF1,
+ md("""## 2 · What changed vs NB2, and why
+
+NB2 bucketed **tools** by their *schema* size (`total_params`) and trained a fresh small model per
+iteration. Two problems: (1) the metric grades the answer against the arguments the gold call **actually
+supplies** (`n_args`), not the schema size — a 5-parameter tool whose queries fill only one argument is an
+*easy* extraction, yet lands in the "4+" bucket; (2) 0/4+ hold only 4–5 tools, so their error bars reflect
+a handful of resampled tools.
+
+**V2 fixes both:**
+- **Bucket per example by `n_args`** (`0 / 1 / 2 / 3+`) — exactly what the extraction metrics grade — so
+  every bucket holds hundreds of examples and difficulty is measured honestly.
+- **One focus40 model** (like NB1/NB3): the only variable across buckets is the number of arguments, not
+  which tools were trained on.
+- **Fixed small offered set** — each query is offered its **gold + 5 distractors** with **full schemas**,
+  token-trimmed to fit the 1024-token encoder (gold is never dropped). Full schemas are large (~110 tok
+  each, up to ~270), so even 6 tools can approach the limit; the trim guarantees no silent truncation and a
+  scorable gold every time. The offering is identical for every example, so the offered-tool count is not a
+  confound."""),
+ md("""### Examples bucketed by #arguments (before finetune)
+
+One row per focus example, tagged with `required` / `total` params **and** `n_args` (what the gold answer
+supplies) + its bucket. `n_args` is the axis V2 studies — it sits between `required` (a floor) and `total`
+(a ceiling that also counts optionals the query may never fill)."""),
+ co('''rows = []
+for ex in raw:
+    try: calls = json.loads(ex["answers"])
+    except (ValueError, TypeError): continue
+    gold = next((c["name"] for c in calls if isinstance(c, dict) and c.get("name")), None)
+    if gold not in set(FOCUS): continue
+    req, tot = cat.params_of(gold)
+    k = gold_n_args(ex)
+    rows.append({"query": ex["query"][:80], "gold_tool": gold, "required_params": req,
+                 "total_params": tot, "n_args": k, "n_args_bucket": nargs_bucket(k)})
+ex_df = pd.DataFrame(rows)
+print("focus examples:", len(ex_df), "| per n_args bucket:",
+      ex_df["n_args_bucket"].value_counts().reindex(NARGS_BUCKET_ORDER).to_dict())
+display(ex_df.head(12))'''),
+ md("## 3 · Configure"),
+ co('''NB_DIR = os.path.join(OUT_DIR, "nb2v2"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
+CAP_PER_TOOL  = 120    # examples/tool -> 100 train / 10 val / 10 test
+OFFER_K       = 6      # tools offered per query at inference: gold + 5 distractors, full schema, token-trimmed
+EPOCHS        = 1
+MAX_GEN_LEN   = 256    # long enough for full argument dicts
+BATCH_SIZE    = 8      # lower to 4 on OOM, raise to 16 if headroom
+N_BOOT        = 1000   # bootstrap resamples for the per-bucket error bars
+RUN_TRAIN     = True
+FORCE_RETRAIN = False
+print("focus tools:", len(FOCUS), "| offered/query:", OFFER_K, "| cap:", CAP_PER_TOOL, "| out:", NB_DIR)'''),
+ md("""## 4 · Train / test split (no leakage)
+
+Both the training subprocess and this notebook call the **same deterministic** `per_tool_split`
+(`seed=42`, 10 test + 10 val per tool). The model trains **only on the train split**; every metric below is
+computed **only on the held-out test split**, so no test query is ever seen in training."""),
+ md("## 5 · Train one focus40 model (full schemas)\\nTrained once to Drive and reused; the returned held-out `test` + `preds` feed the per-example scoring."),
+ co('''DEPTH = finetune_and_eval(cat, raw, tok, FOCUS, "depth_focus40", NB_DIR,
+                          cap=CAP_PER_TOOL, epochs=EPOCHS, compact=False, token_aware=True,
+                          offer_all=OFFER_K, eval_subsample=None, run_train=RUN_TRAIN,
+                          force_retrain=FORCE_RETRAIN, max_gen_len=MAX_GEN_LEN, batch_size=BATCH_SIZE)
+TEST, PREDS = DEPTH["test"], DEPTH["preds"]
+log(f"model ready · held-out test queries={len(TEST)} · selection={DEPTH['metrics']['selection_acc']:.3f}")'''),
+ md("""## 6 · Score the held-out test per example
+
+`evaluate_per_example` returns one scored row per non-abstention query (`selected`, `args_exact`, and
+per-parameter `p_tp/p_fp/p_fn`). We tag each row with the query's `n_args` bucket — computed with the same
+abstention filter so the two align row-for-row."""),
+ co('''scored = evaluate_per_example(TEST, PREDS)
+n_args_list = []
+for e in TEST:
+    try: calls = json.loads(e.get("answers", "[]"))
+    except (ValueError, TypeError): calls = []
+    prim = next((c for c in calls if isinstance(c, dict) and c.get("name")), None)
+    if prim is None: continue                        # abstention — evaluate_per_example skips it too
+    a = prim.get("arguments", {})
+    n_args_list.append(len(a) if isinstance(a, dict) else 0)
+assert len(n_args_list) == len(scored), "alignment mismatch between scores and n_args"
+per_ex = pd.DataFrame(scored)
+per_ex["n_args"] = n_args_list
+per_ex["bucket"] = per_ex["n_args"].map(nargs_bucket)
+print("scored test examples:", len(per_ex), "| per bucket:",
+      per_ex["bucket"].value_counts().reindex(NARGS_BUCKET_ORDER).to_dict())
+display(per_ex.head(10))'''),
+ md("""## 7 · Accuracy per #args bucket (bootstrap 95% CI)
+
+A single model → the uncertainty is *which test queries we happened to draw*, so error bars come from
+**bootstrapping the test examples**. `args_exact_acc` is the mean over selected queries; `param_f1` is a
+**micro**-F1 (summed `tp/fp/fn`) — undefined at bucket 0 (no parameters), shown as **n/a**."""),
+ co('''def _f1(tp, fp, fn): return 2*tp / max(2*tp + fp + fn, 1)
+
+def _bucket_point(df):
+    sel = df[df["selected"] == 1]
+    ae = sel["args_exact"].mean() if len(sel) else np.nan
+    pf = _f1(sel["p_tp"].sum(), sel["p_fp"].sum(), sel["p_fn"].sum()) if len(sel) else np.nan
+    return float(df["selected"].mean()), float(ae), float(pf)
+
+def _bucket_ci(df, n_boot=N_BOOT, seed=0):
+    rng = np.random.default_rng(seed)
+    sel = df["selected"].values; ax = df["args_exact"].values
+    tp, fp, fn = df["p_tp"].values, df["p_fp"].values, df["p_fn"].values
+    ae, pf = [], []
+    for _ in range(n_boot):
+        s = rng.integers(0, len(df), len(df)); m = sel[s] == 1
+        if m.sum() == 0: continue
+        ae.append(ax[s][m].mean())
+        pf.append(_f1(tp[s][m].sum(), fp[s][m].sum(), fn[s][m].sum()))
+    ci = lambda v: (float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))) if v else (np.nan, np.nan)
+    return ci(ae), ci(pf)
+
+agg = []
+for b in NARGS_BUCKET_ORDER:
+    d = per_ex[per_ex["bucket"] == b]
+    if d.empty: continue
+    sacc, ae, pf = _bucket_point(d); (ae_lo, ae_hi), (pf_lo, pf_hi) = _bucket_ci(d)
+    if b == "0": pf, pf_lo, pf_hi = np.nan, np.nan, np.nan   # param_f1 undefined at 0 params
+    agg.append({"bucket": b, "n": len(d), "n_selected": int(d["selected"].sum()),
+                "selection_acc": round(sacc, 4), "args_exact_acc": round(ae, 4),
+                "args_ci": [round(ae_lo, 4), round(ae_hi, 4)], "param_f1": None if np.isnan(pf) else round(pf, 4),
+                "pf1_ci": [None, None] if np.isnan(pf) else [round(pf_lo, 4), round(pf_hi, 4)]})
+RES = os.path.join(NB_DIR, "depth_by_example_results.json")
+json.dump({"offer_k": OFFER_K, "n_test": len(per_ex), "buckets": agg}, open(RES, "w"), indent=2)
+log(f"saved {RES}")
+display(pd.DataFrame(agg))'''),
+ md("## 8 · The Depth-by-example plot"),
+ co('''ORDER = [r["bucket"] for r in agg]
+x = np.arange(len(ORDER)); w = 0.38
+def _yerr(rows, mkey, cikey):
+    lo, hi = [], []
+    for r in rows:
+        m = r[mkey]; c = r[cikey]
+        if m is None or c[0] is None: lo.append(0); hi.append(0)
+        else: lo.append(max(0, m - c[0])); hi.append(max(0, c[1] - m))
+    return np.array([lo, hi])
+ae = [r["args_exact_acc"] for r in agg]
+pf = [0 if r["param_f1"] is None else r["param_f1"] for r in agg]
+fig, ax = plt.subplots(figsize=(7.6, 4.6))
+ax.bar(x-w/2, ae, w, yerr=_yerr(agg, "args_exact_acc", "args_ci"), capsize=3,
+       color="#0072B2", edgecolor="white", lw=0.6, label="args_exact_acc (all-or-nothing)",
+       error_kw=dict(lw=1, ecolor="#444"))
+ax.bar(x+w/2, pf, w, yerr=_yerr(agg, "param_f1", "pf1_ci"), capsize=3,
+       color="#E69F00", edgecolor="white", lw=0.6, label="param_f1 (partial credit)",
+       error_kw=dict(lw=1, ecolor="#444"))
+for xi, r in zip(x-w/2, agg): ax.text(xi, min(r["args_exact_acc"]+0.04, 1.04), f"{r['args_exact_acc']:.2f}", ha="center", fontsize=9, color="#0072B2")
+for xi, r in zip(x+w/2, agg):
+    if r["param_f1"] is None: ax.text(xi, 0.03, "n/a", ha="center", fontsize=9, color="#8a8a8a")
+    else: ax.text(xi, min(r["param_f1"]+0.04, 1.04), f"{r['param_f1']:.2f}", ha="center", fontsize=9, color="#b07400")
+ax.set_xticks(x); ax.set_xticklabels([f"{r['bucket']}\\n(n={r['n']})" for r in agg])
+ax.set_ylim(0, 1.08); ax.set_xlabel("Number of arguments the gold answer supplies (n_args)")
+ax.set_ylabel("Extraction accuracy")
+ax.set_title("Impact of Argument Count on Parameter-Extraction Accuracy")
+ax.legend(loc="lower left")
+if sns: sns.despine(ax=ax)
+ax.grid(axis="y", color="#cccccc", lw=0.6, alpha=0.6); ax.set_axisbelow(True)
+plt.tight_layout(); save_fig("depth_by_example", out_dir=NB_DIR); plt.show()'''),
+ md("""## 9 · Read-out
+
+One focus40 model, probed on held-out queries each offered its gold tool plus five full-schema distractors,
+scored **per example** by how many arguments the answer requires. Because the offered set is identical
+across buckets, the trend isolates a single variable — argument count. Exact-match extraction falls as more
+arguments must be produced, while `param_f1` degrades more gently (partial credit for the arguments that are
+right). **Takeaway:** PICKO reliably picks the tool, but *fully* populating a multi-argument call is the
+harder half of the task, and that difficulty scales with the number of arguments actually required."""),
+]
+
+
 def write(cells, name):
     for j, c in enumerate(cells):
         c["id"] = f"c{j:02d}"
@@ -437,4 +606,5 @@ def write(cells, name):
 if __name__ == "__main__":
     write(nb1, "nb1_breadth_amount.ipynb")
     write(nb2, "nb2_depth_parameters.ipynb")
+    write(nb2v2, "nb2v2_depth_by_example.ipynb")
     write(nb3, "nb3_separation_ambiguous.ipynb")
