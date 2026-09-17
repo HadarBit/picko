@@ -126,27 +126,28 @@ Both the training subprocess and this notebook call the **same deterministic** `
 (`seed=42`, 10 test + 10 val per tool). The model trains **only on the train split**; the sweep below runs
 **only on the held-out test split**, so no test query is ever seen in training."""),
  md("## 3 · Configure"),
- co('''BREADTH_SIZES  = [3, 5, 10, 20, 30, 40]   # tools offered per query at inference
+ co('''NB_DIR = os.path.join(OUT_DIR, "nb1"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
+BREADTH_SIZES  = [3, 5, 10, 20, 30, 40]   # tools offered per query at inference
 N_REPEATS      = 8                        # random subsets averaged per size (mean +/- std)
-CAP_PER_TOOL   = 40                       # examples/tool for the finetune
+CAP_PER_TOOL   = 120                       # examples/tool -> 100 train / 10 val / 10 test
 EPOCHS         = 1
 EVAL_SUBSAMPLE = 60                        # test queries per (size, repeat); None = full
 MAX_GEN_LEN    = 64
 BATCH_SIZE     = 8                         # lower to 4 on OOM, raise to 16 if headroom
 RUN_TRAIN      = True
 FORCE_RETRAIN  = False
-print("focus tools:", len(FOCUS), "| sizes:", BREADTH_SIZES, "| repeats/size:", N_REPEATS)'''),
+print("focus tools:", len(FOCUS), "| sizes:", BREADTH_SIZES, "| repeats/size:", N_REPEATS, "| out:", NB_DIR)'''),
  md("## 4 · Train the model (40 focus tools, compact)\\nTrained once to Drive and reused; the returned `test` set is the held-out split used by the sweep."),
- co('''FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "breadth_focus40", OUT_DIR,
+ co('''FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "breadth_focus40", NB_DIR,
                             cap=CAP_PER_TOOL, epochs=EPOCHS, compact=True, offer_all=len(FOCUS),
                             eval_subsample=None, run_train=RUN_TRAIN, force_retrain=FORCE_RETRAIN,
                             max_gen_len=MAX_GEN_LEN, batch_size=BATCH_SIZE)
 m40, p40, tk40 = FOCUS40["bundle"]
 TEST = FOCUS40["test"]                     # held-out test queries (never trained on)
 log(f"model ready · held-out test queries={len(TEST)}")'''),
- md("## 5 · Sweep: offer k tools per query, repeat, average\\nInference only, on the held-out test set. Resumable: finished `(k, repeat)` pairs persist to `breadth_results.json`."),
+ md("## 5 · Sweep: offer k tools per query, repeat, average\\nInference only, on the held-out test set. Resumable: finished `(k, repeat)` pairs persist to `nb1/breadth_results.json`."),
  co('''import contextlib, io
-RES = os.path.join(OUT_DIR, "breadth_results.json")
+RES = os.path.join(NB_DIR, "breadth_results.json")
 rows = json.load(open(RES)) if (os.path.exists(RES) and not FORCE_RETRAIN) else []
 done = {(r["k"], r["repeat"]) for r in rows}
 if done: log(f"resumed {len(done)} finished (k,repeat) run(s)")
@@ -198,7 +199,7 @@ if len(wall):
 ax.set_xlabel("# tools offered at inference (k)"); ax.set_ylabel("tool-selection accuracy")
 ax.set_ylim(0,1.02); ax.set_title(f"Breadth: selection vs #tools offered ({int(breadth['n_repeats'].max())} subsets/size)")
 ax.legend()
-plt.tight_layout(); save_fig("breadth_curve"); plt.show()'''),
+plt.tight_layout(); save_fig("breadth_curve", out_dir=NB_DIR); plt.show()'''),
  md("""## 7 · Read-out
 
 One model, probed on held-out queries with random subsets of `k` tools, so the curve reflects the *offered*
@@ -222,30 +223,31 @@ several iterations — so each bucket gets many measurements and we can show **e
 the collected per-tool rows in `picko_out/depth_results.json`.""")
 nb2 += [
  md("## 2 · Configure the repeated sampling\\nEach iteration draws `TOOLS_PER_BUCKET` tools from **each** bucket (0 / 1 / 2-3 / 4+) into one small model."),
- co('''N_ITER          = 5     # <- number of independent (tool-sample + finetune) iterations
+ co('''NB_DIR = os.path.join(OUT_DIR, "nb2"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
+N_ITER          = 5     # <- number of independent (tool-sample + finetune) iterations
 TOOLS_PER_BUCKET = 2     # tools drawn from each param bucket per iteration
-CAP_PER_TOOL     = 40
+CAP_PER_TOOL     = 120   # examples/tool -> 100 train / 10 val / 10 test
 EPOCHS           = 1
 EVAL_SUBSAMPLE   = 40
-BATCH_SIZE       = 8     # safe on L4 (kernel + train subprocess share the GPU); raise to 16 if headroom, lower to 4 on OOM
+BATCH_SIZE       = 8     # lower to 4 on OOM, raise to 16 if headroom
 RUN_TRAIN        = True
 FORCE_RETRAIN    = False
-print("param buckets available:", tools_dataframe(cat, FOCUS)["param_bucket"].value_counts().to_dict())'''),
- md("## 3 · Run the iterations\\n*Resumable:* finished iterations are skipped; per-tool rows persist to `OUT_DIR/depth_results.json` after each iteration."),
- co('''RES = os.path.join(OUT_DIR, "depth_results.json")
+print("param buckets available:", tools_dataframe(cat, FOCUS)["param_bucket"].value_counts().to_dict(), "| out:", NB_DIR)'''),
+ md("## 3 · Run the iterations\\n*Resumable:* finished iterations are skipped; per-tool rows persist to `nb2/depth_results.json` after each iteration."),
+ co('''RES = os.path.join(NB_DIR, "depth_results.json")
 rows = json.load(open(RES)) if (os.path.exists(RES) and not FORCE_RETRAIN) else []
 done_iters = {r["iteration"] for r in rows}
 if done_iters: log(f"loaded {len(done_iters)} finished iteration(s) from {RES}")
 
 t_all = time.time()
 for i in range(N_ITER):
-    ckpt = os.path.join(OUT_DIR, f"picko_depth_iter{i}_best.pkl")
+    ckpt = os.path.join(NB_DIR, f"picko_depth_iter{i}_best.pkl")
     if (i in done_iters) and os.path.exists(ckpt) and not FORCE_RETRAIN:
         log(f"iter {i}: skip (already done)"); continue
     try:
         names = sample_stratified(cat, FOCUS, TOOLS_PER_BUCKET, seed=i)
         log(f"=== start iter {i} · tools={names} ===")
-        R = finetune_and_eval(cat, raw, tok, names, f"depth_iter{i}", OUT_DIR,
+        R = finetune_and_eval(cat, raw, tok, names, f"depth_iter{i}", NB_DIR,
                               cap=CAP_PER_TOOL, epochs=EPOCHS, compact=False, token_aware=True,
                               eval_subsample=EVAL_SUBSAMPLE, run_train=RUN_TRAIN,
                               force_retrain=FORCE_RETRAIN, batch_size=BATCH_SIZE)
@@ -289,7 +291,7 @@ for _, r in per_iter.iterrows():
 ax.set_xticks(x); ax.set_xticklabels(agg.index); ax.set_ylim(0,1)
 ax.set_xlabel("# parameters (bucket)"); ax.set_ylabel("accuracy")
 ax.set_title(f"Depth: parameter extraction vs #params ({int(agg['n_iter'].max())} iterations)"); ax.legend()
-plt.tight_layout(); save_fig("depth_buckets"); plt.show()'''),
+plt.tight_layout(); save_fig("depth_buckets", out_dir=NB_DIR); plt.show()'''),
  md("## 5 · Per-tool scatter (all iterations)"),
  co('''tool_mean = depth.groupby(["tool","total_params"])["args_exact_acc"].mean().reset_index()
 plt.figure(figsize=(7.5,4.5))
@@ -298,7 +300,7 @@ for _, r in tool_mean.iterrows():
     plt.annotate(r["tool"].split("_")[0], (r["total_params"], r["args_exact_acc"]), fontsize=7)
 plt.xlabel("# parameters in tool"); plt.ylabel("mean args_exact_acc")
 plt.title("Depth: per-tool extraction vs parameter count")
-plt.tight_layout(); save_fig("depth_scatter"); plt.show()'''),
+plt.tight_layout(); save_fig("depth_scatter", out_dir=NB_DIR); plt.show()'''),
  md("""## 6 · Read-out
 
 Argument extraction is near-solved for **0–1 parameter** tools and **degrades for multi-parameter (4+)**
@@ -331,18 +333,19 @@ for g, tools in SIMILAR_GROUPS.items():
 groups_df = pd.DataFrame(grp_rows)
 display(groups_df)'''),
  md("## 4 · Train the model (40 focus tools)\\nTrained once to Drive and reused; the returned `test` set is the held-out split the group probes run on."),
- co('''CAP_PER_TOOL, EPOCHS, BATCH_SIZE = 40, 1, 8   # BATCH_SIZE: lower to 4 on OOM, raise to 16 if headroom
+ co('''NB_DIR = os.path.join(OUT_DIR, "nb3"); os.makedirs(NB_DIR, exist_ok=True)   # this notebook's outputs
+CAP_PER_TOOL, EPOCHS, BATCH_SIZE = 120, 1, 8   # examples/tool -> 100 train / 10 val / 10 test; BATCH_SIZE: lower to 4 on OOM
 RUN_TRAIN, FORCE_RETRAIN = True, False
-FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "focus40", OUT_DIR,
+FOCUS40 = finetune_and_eval(cat, raw, tok, FOCUS, "focus40", NB_DIR,
                             cap=CAP_PER_TOOL, epochs=EPOCHS, compact=False, token_aware=True,
                             eval_subsample=None, run_train=RUN_TRAIN,
                             force_retrain=FORCE_RETRAIN, batch_size=BATCH_SIZE)
 m40, p40, tk40 = FOCUS40["bundle"]
 TEST = FOCUS40["test"]                     # held-out test queries (never trained on)
 log(f"focus40 selection_acc={FOCUS40['metrics']['selection_acc']:.3f} · held-out test={len(TEST)}")'''),
- md("## 5 · Per-group disambiguation\\nFor each group we take the held-out queries whose gold tool is in the group and offer the full group. Resumable: finished groups persist to `separation_results.json`."),
+ md("## 5 · Per-group disambiguation\\nFor each group we take the held-out queries whose gold tool is in the group and offer the full group. Resumable: finished groups persist to `nb3/separation_results.json`."),
  co('''import contextlib, io
-RES = os.path.join(OUT_DIR, "separation_results.json")
+RES = os.path.join(NB_DIR, "separation_results.json")
 prev = json.load(open(RES)) if (os.path.exists(RES) and not FORCE_RETRAIN) else {"per_group": [], "confusion": {}}
 sep_by = {r["group"]: r for r in prev.get("per_group", [])}
 group_conf = prev.get("confusion", {})
@@ -379,7 +382,7 @@ display(separation)
 
 plt.figure(figsize=(8,4)); plt.barh(separation["group"], separation["selection_acc"], color="#4C72B0")
 plt.xlim(0,1); plt.xlabel("tool-selection accuracy"); plt.title("Separation: hardest look-alike groups (lower = more confused)")
-plt.tight_layout(); save_fig("separation_groups"); plt.show()'''),
+plt.tight_layout(); save_fig("separation_groups", out_dir=NB_DIR); plt.show()'''),
  md("## 6 · Confusion heatmaps (who gets mistaken for whom)"),
  co('''for gname, conf in group_conf.items():
     labels = sorted(set(conf) | {p for row in conf.values() for p in row})
@@ -391,7 +394,7 @@ plt.tight_layout(); save_fig("separation_groups"); plt.show()'''),
     else:
         plt.imshow(M.values, cmap="Blues"); plt.xticks(range(len(labels)), labels, rotation=90); plt.yticks(range(len(M)), M.index)
     plt.title(f"Separation · {gname}"); plt.xlabel("predicted"); plt.ylabel("reference")
-    plt.tight_layout(); save_fig(f"separation_confusion_{gname}"); plt.show()'''),
+    plt.tight_layout(); save_fig(f"separation_confusion_{gname}", out_dir=NB_DIR); plt.show()'''),
  md("""## 7 · Read-out
 
 Residual selection errors concentrate inside these look-alike groups. The lowest-accuracy group is the
